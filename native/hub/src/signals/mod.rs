@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Deserialize, DartSignal)]
 pub struct SmallText {
     pub text: String,
+    pub width_ratio: u32,
+    pub height_ratio: u32,
 }
 
 /// To send data from Rust to Dart, use `RustSignal`.

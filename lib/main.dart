@@ -65,8 +65,11 @@ class MyHomePage extends StatefulWidget {
 
 class _MyHomePageState extends State<MyHomePage> {
   final TextEditingController _textController = TextEditingController();
+  final TextEditingController _widthRatioController = TextEditingController(text: '21');
+  final TextEditingController _heightRatioController = TextEditingController(text: '13');
   StreamSubscription<RustSignalPack<GeneratedImage>>? _generatedImageSub;
   Uint8List? _latestImage;
+  double _zoomLevel = 1.0;
 
   @override
   void initState() {
@@ -74,14 +77,26 @@ class _MyHomePageState extends State<MyHomePage> {
     _generatedImageSub = GeneratedImage.rustSignalStream.listen((signal) {
       if (!mounted) return;
       setState(() {
-        _latestImage = signal.message.pngBytes;
+        _latestImage = Uint8List.fromList(signal.message.pngBytes);
+        _zoomLevel = 1.0; // Reset zoom when new image is generated
       });
     });
   }
 
   void _sendTextToRust() {
     final text = _textController.text;
-    SmallText(text: text).sendSignalToRust();
+    final widthRatio = int.tryParse(_widthRatioController.text) ?? 21;
+    final heightRatio = int.tryParse(_heightRatioController.text) ?? 13;
+    
+    // Ensure positive non-zero values
+    final safeWidth = widthRatio > 0 ? widthRatio : 21;
+    final safeHeight = heightRatio > 0 ? heightRatio : 13;
+    
+    SmallText(
+      text: text,
+      widthRatio: safeWidth,
+      heightRatio: safeHeight,
+    ).sendSignalToRust();
   }
 
   Future<void> _downloadImage() async {
@@ -192,6 +207,40 @@ class _MyHomePageState extends State<MyHomePage> {
                         ),
                       ),
                     ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: _widthRatioController,
+                              keyboardType: TextInputType.number,
+                              decoration: const InputDecoration(
+                                labelText: 'Width Ratio',
+                                border: OutlineInputBorder(),
+                                hintText: '21',
+                              ),
+                            ),
+                          ),
+                          const Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 8.0),
+                            child: Text(':', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+                          ),
+                          Expanded(
+                            child: TextField(
+                              controller: _heightRatioController,
+                              keyboardType: TextInputType.number,
+                              decoration: const InputDecoration(
+                                labelText: 'Height Ratio',
+                                border: OutlineInputBorder(),
+                                hintText: '13',
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
                     ElevatedButton(
                       onPressed: _sendTextToRust,
                       child: const Text('Generate'),
@@ -200,13 +249,69 @@ class _MyHomePageState extends State<MyHomePage> {
                     if (_latestImage != null) ...[
                       const Text('Generated image:'),
                       const SizedBox(height: 8),
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(8),
-                        child: Image.memory(
-                          _latestImage!,
-                          width: 160,
-                          height: 160,
-                          fit: BoxFit.cover,
+                      // Zoom controls
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.zoom_out),
+                            onPressed: () => setState(() {
+                              _zoomLevel = (_zoomLevel - 0.2).clamp(0.5, 5.0);
+                            }),
+                          ),
+                          SizedBox(
+                            width: 150,
+                            child: Slider(
+                              value: _zoomLevel,
+                              min: 0.5,
+                              max: 5.0,
+                              divisions: 45,
+                              label: '${(_zoomLevel * 100).toStringAsFixed(0)}%',
+                              onChanged: (value) => setState(() {
+                                _zoomLevel = value;
+                              }),
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.zoom_in),
+                            onPressed: () => setState(() {
+                              _zoomLevel = (_zoomLevel + 0.2).clamp(0.5, 5.0);
+                            }),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.refresh),
+                            onPressed: () => setState(() {
+                              _zoomLevel = 1.0;
+                            }),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      // Image preview with zoom and pan
+                      Container(
+                        constraints: BoxConstraints(
+                          maxWidth: MediaQuery.of(context).size.width - 32,
+                          maxHeight: 400,
+                        ),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.grey),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: InteractiveViewer(
+                          transformationController: TransformationController(),
+                          boundaryMargin: const EdgeInsets.all(20),
+                          minScale: 0.5,
+                          maxScale: 5.0,
+                          child: Transform.scale(
+                            scale: _zoomLevel,
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(8),
+                              child: Image.memory(
+                                _latestImage!,
+                                fit: BoxFit.contain,
+                              ),
+                            ),
+                          ),
                         ),
                       ),
                       const SizedBox(height: 8),
@@ -240,6 +345,8 @@ class _MyHomePageState extends State<MyHomePage> {
   void dispose() {
     _generatedImageSub?.cancel();
     _textController.dispose();
+    _widthRatioController.dispose();
+    _heightRatioController.dispose();
     super.dispose();
   }
 }

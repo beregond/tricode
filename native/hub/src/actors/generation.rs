@@ -40,7 +40,7 @@ impl Notifiable<SmallText> for GenerationActor {
         }
         .send_signal_to_dart();
 
-        let png_bytes = tricode::generate_image(&msg.text);
+        let png_bytes = tricode::generate_image(&msg.text, msg.width_ratio, msg.height_ratio);
         if !png_bytes.is_empty() {
             GeneratedImage {
                 png_bytes,
