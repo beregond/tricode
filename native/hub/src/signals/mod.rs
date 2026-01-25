@@ -19,6 +19,12 @@ pub struct GeneratedBytes {
     pub bytes: Vec<u8>,
 }
 
+/// PNG image bytes generated from an input payload.
+#[derive(Serialize, RustSignal)]
+pub struct GeneratedImage {
+    pub png_bytes: Vec<u8>,
+}
+
 /// A signal can be nested inside another signal.
 #[derive(Serialize, RustSignal)]
 pub struct BigBool {

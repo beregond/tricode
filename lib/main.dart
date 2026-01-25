@@ -63,7 +63,9 @@ class MyHomePage extends StatefulWidget {
 class _MyHomePageState extends State<MyHomePage> {
   final TextEditingController _textController = TextEditingController();
   StreamSubscription<RustSignalPack<GeneratedBytes>>? _generatedBytesSub;
+  StreamSubscription<RustSignalPack<GeneratedImage>>? _generatedImageSub;
   Uint8List? _latestBytes;
+  Uint8List? _latestImage;
 
   @override
   void initState() {
@@ -72,6 +74,13 @@ class _MyHomePageState extends State<MyHomePage> {
       if (!mounted) return;
       setState(() {
         _latestBytes = signal.message.bytes;
+      });
+    });
+
+    _generatedImageSub = GeneratedImage.rustSignalStream.listen((signal) {
+      if (!mounted) return;
+      setState(() {
+        _latestImage = signal.message.pngBytes;
       });
     });
   }
@@ -131,6 +140,20 @@ class _MyHomePageState extends State<MyHomePage> {
                       Text(_formatBytes(_latestBytes!)),
                       const SizedBox(height: 20),
                     ],
+                    if (_latestImage != null) ...[
+                      const Text('Generated image:'),
+                      const SizedBox(height: 8),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: Image.memory(
+                          _latestImage!,
+                          width: 160,
+                          height: 160,
+                          fit: BoxFit.cover,
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                    ],
                   ],
                 ),
               ),
@@ -153,6 +176,7 @@ class _MyHomePageState extends State<MyHomePage> {
   @override
   void dispose() {
     _generatedBytesSub?.cancel();
+    _generatedImageSub?.cancel();
     _textController.dispose();
     super.dispose();
   }
