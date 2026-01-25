@@ -73,24 +73,12 @@ class _MyHomePageState extends State<MyHomePage> {
       setState(() {
         _latestBytes = signal.message.bytes;
       });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Received ${signal.message.bytes.length} bytes from Rust',
-          ),
-        ),
-      );
     });
   }
 
   void _sendTextToRust() {
     final text = _textController.text;
     SmallText(text: text).sendSignalToRust();
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Sent to Rust: $text')),
-    );
   }
 
   String _formatBytes(Uint8List bytes) {
@@ -123,8 +111,10 @@ class _MyHomePageState extends State<MyHomePage> {
                       padding: const EdgeInsets.all(16.0),
                       child: TextField(
                         controller: _textController,
-                        textInputAction: TextInputAction.send,
-                        onSubmitted: (_) => _sendTextToRust(),
+                        keyboardType: TextInputType.multiline,
+                        textInputAction: TextInputAction.newline,
+                        minLines: 3,
+                        maxLines: null,
                         decoration: const InputDecoration(
                           labelText: 'Enter text',
                           border: OutlineInputBorder(),
@@ -149,7 +139,7 @@ class _MyHomePageState extends State<MyHomePage> {
               child: Padding(
                 padding: EdgeInsets.all(24.0),
                 child: Text(
-                  'Lorem ipsum dolor sit amet, consectetur adipiscing elit. Vestibulum in ante nec eros semper ultricies.',
+                  'Lorem ipsum dolor sit amet',
                   textAlign: TextAlign.center,
                 ),
               ),
