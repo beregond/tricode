@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:rinf/rinf.dart';
+import 'package:file_selector/file_selector.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'src/bindings/bindings.dart';
 
@@ -90,6 +93,78 @@ class _MyHomePageState extends State<MyHomePage> {
     SmallText(text: text).sendSignalToRust();
   }
 
+  Future<void> _downloadImage() async {
+    if (_latestImage == null) return;
+
+    try {
+      // Generate a default filename with timestamp
+      final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-').split('.')[0];
+      final defaultName = 'generated_image_$timestamp.png';
+
+      if (Platform.isAndroid || Platform.isIOS) {
+        // For mobile platforms, save to downloads directory
+        final directory = Platform.isAndroid
+            ? await getExternalStorageDirectory()
+            : await getApplicationDocumentsDirectory();
+        
+        if (directory == null) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Could not access storage directory')),
+            );
+          }
+          return;
+        }
+
+        final filePath = '${directory.path}/$defaultName';
+        final file = File(filePath);
+        await file.writeAsBytes(_latestImage!);
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Image saved to: $filePath')),
+          );
+        }
+      } else {
+        // For desktop platforms, use file picker
+        final filePath = await getSaveLocation(
+          suggestedName: defaultName,
+          acceptedTypeGroups: [
+            const XTypeGroup(
+              label: 'PNG Images',
+              extensions: ['png'],
+            ),
+          ],
+        );
+
+        if (filePath == null) {
+          // User canceled the dialog
+          return;
+        }
+
+        final file = XFile.fromData(
+          _latestImage!,
+          mimeType: 'image/png',
+          name: defaultName,
+        );
+
+        await file.saveTo(filePath.path);
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Image saved to: ${filePath.path}')),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error saving image: $e')),
+        );
+      }
+    }
+  }
+
   String _formatBytes(Uint8List bytes) {
     return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
   }
@@ -151,6 +226,12 @@ class _MyHomePageState extends State<MyHomePage> {
                           height: 160,
                           fit: BoxFit.cover,
                         ),
+                      ),
+                      const SizedBox(height: 8),
+                      ElevatedButton.icon(
+                        onPressed: _downloadImage,
+                        icon: const Icon(Icons.download),
+                        label: const Text('Download Image'),
                       ),
                       const SizedBox(height: 20),
                     ],
