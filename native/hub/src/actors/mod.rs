@@ -2,9 +2,9 @@
 //! To build a solid app, avoid communicating by sharing memory.
 //! Focus on message passing instead.
 
-mod first;
+mod generation;
 
-use first::FirstActor;
+use generation::GenerationActor;
 use messages::prelude::Context;
 use tokio::spawn;
 
@@ -21,10 +21,10 @@ pub async fn create_actors() {
     // such as websockets or timers.
 
     // Create actor contexts.
-    let first_context = Context::new();
-    let first_addr = first_context.address();
+    let generation_context = Context::new();
+    let generation_addr = generation_context.address();
 
     // Spawn the actors.
-    let first_actor = FirstActor::new(first_addr.clone());
-    spawn(first_context.run(first_actor));
+    let generation_actor = GenerationActor::new(generation_addr.clone());
+    spawn(generation_context.run(generation_actor));
 }
