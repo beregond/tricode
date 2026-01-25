@@ -1,6 +1,10 @@
-import 'package:rinf/rinf.dart';
-import 'src/bindings/bindings.dart';
+import 'dart:async';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
+import 'package:rinf/rinf.dart';
+
+import 'src/bindings/bindings.dart';
 
 Future<void> main() async {
   await initializeRust(assignRustSignal);
@@ -59,6 +63,27 @@ class MyHomePage extends StatefulWidget {
 class _MyHomePageState extends State<MyHomePage> {
   int _counter = 0;
   final TextEditingController _textController = TextEditingController();
+  StreamSubscription<RustSignalPack<GeneratedBytes>>? _generatedBytesSub;
+  Uint8List? _latestBytes;
+
+  @override
+  void initState() {
+    super.initState();
+    _generatedBytesSub = GeneratedBytes.rustSignalStream.listen((signal) {
+      if (!mounted) return;
+      setState(() {
+        _latestBytes = signal.message.bytes;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Received ${signal.message.bytes.length} bytes from Rust',
+          ),
+        ),
+      );
+    });
+  }
 
   void _incrementCounter() {
     setState(() {
@@ -69,6 +94,19 @@ class _MyHomePageState extends State<MyHomePage> {
       // called again, and so nothing would appear to happen.
       _counter++;
     });
+  }
+
+  void _sendTextToRust() {
+    final text = _textController.text;
+    SmallText(text: text).sendSignalToRust();
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Sent to Rust: $text')),
+    );
+  }
+
+  String _formatBytes(Uint8List bytes) {
+    return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
   }
 
   @override
@@ -120,15 +158,15 @@ class _MyHomePageState extends State<MyHomePage> {
               ),
             ),
             ElevatedButton(
-              onPressed: () {
-                final text = _textController.text;
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('Generated: $text')),
-                );
-              },
+              onPressed: _sendTextToRust,
               child: const Text('Generate'),
             ),
             const SizedBox(height: 20),
+            if (_latestBytes != null) ...[
+              const Text('Latest bytes from Rust:'),
+              Text(_formatBytes(_latestBytes!)),
+              const SizedBox(height: 20),
+            ],
             const Text('You have pushed the button this many times:'),
             Text(
               '$_counter',
@@ -148,6 +186,7 @@ class _MyHomePageState extends State<MyHomePage> {
 
   @override
   void dispose() {
+    _generatedBytesSub?.cancel();
     _textController.dispose();
     super.dispose();
   }

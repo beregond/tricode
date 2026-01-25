@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::signals::{BigBool, SmallNumber, SmallText};
+use crate::signals::{BigBool, GeneratedBytes, SmallNumber, SmallText};
 use async_trait::async_trait;
 use messages::prelude::{Actor, Address, Context, Handler, Notifiable};
 use rinf::{DartSignal, RustSignal, debug_print};
@@ -25,7 +25,6 @@ impl FirstActor {
     pub fn new(self_addr: Address<Self>) -> Self {
         let mut _owned_tasks = JoinSet::new();
         _owned_tasks.spawn(Self::listen_to_dart(self_addr.clone()));
-        _owned_tasks.spawn(Self::listen_to_timer(self_addr));
         FirstActor { _owned_tasks }
     }
 }
@@ -35,8 +34,14 @@ impl FirstActor {
 #[async_trait]
 impl Notifiable<SmallText> for FirstActor {
     async fn notify(&mut self, msg: SmallText, _: &Context<Self>) {
-        debug_print!("{}", msg.text);
+        debug_print!("Received text: {}", msg.text);
         SmallNumber { number: 7 }.send_signal_to_dart();
+        //return;
+        let generated_bytes = tricode::generate_code(&msg.text);
+        GeneratedBytes {
+            bytes: generated_bytes,
+        }
+        .send_signal_to_dart();
     }
 }
 
@@ -57,16 +62,6 @@ impl FirstActor {
         let receiver = SmallText::get_dart_signal_receiver();
         while let Some(signal_pack) = receiver.recv().await {
             let _ = self_addr.notify(signal_pack.message).await;
-        }
-    }
-
-    /// Listen to an external source, which in this case is a timer.
-    async fn listen_to_timer(mut self_addr: Address<Self>) {
-        let mut time_interval = interval(Duration::from_secs(3));
-        let text = "From an owned task".to_owned();
-        loop {
-            time_interval.tick().await;
-            let _ = self_addr.notify(SmallText { text: text.clone() }).await;
         }
     }
 }

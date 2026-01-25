@@ -13,6 +13,12 @@ pub struct SmallNumber {
     pub number: i32,
 }
 
+/// Bytes generated from the `tricode` crate.
+#[derive(Serialize, RustSignal)]
+pub struct GeneratedBytes {
+    pub bytes: Vec<u8>,
+}
+
 /// A signal can be nested inside another signal.
 #[derive(Serialize, RustSignal)]
 pub struct BigBool {
