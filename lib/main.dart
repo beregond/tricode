@@ -65,21 +65,12 @@ class MyHomePage extends StatefulWidget {
 
 class _MyHomePageState extends State<MyHomePage> {
   final TextEditingController _textController = TextEditingController();
-  StreamSubscription<RustSignalPack<GeneratedBytes>>? _generatedBytesSub;
   StreamSubscription<RustSignalPack<GeneratedImage>>? _generatedImageSub;
-  Uint8List? _latestBytes;
   Uint8List? _latestImage;
 
   @override
   void initState() {
     super.initState();
-    _generatedBytesSub = GeneratedBytes.rustSignalStream.listen((signal) {
-      if (!mounted) return;
-      setState(() {
-        _latestBytes = signal.message.bytes;
-      });
-    });
-
     _generatedImageSub = GeneratedImage.rustSignalStream.listen((signal) {
       if (!mounted) return;
       setState(() {
@@ -165,10 +156,6 @@ class _MyHomePageState extends State<MyHomePage> {
     }
   }
 
-  String _formatBytes(Uint8List bytes) {
-    return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
-  }
-
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
@@ -210,11 +197,6 @@ class _MyHomePageState extends State<MyHomePage> {
                       child: const Text('Generate'),
                     ),
                     const SizedBox(height: 20),
-                    if (_latestBytes != null) ...[
-                      const Text('Latest bytes from Rust:'),
-                      Text(_formatBytes(_latestBytes!)),
-                      const SizedBox(height: 20),
-                    ],
                     if (_latestImage != null) ...[
                       const Text('Generated image:'),
                       const SizedBox(height: 8),
@@ -256,7 +238,6 @@ class _MyHomePageState extends State<MyHomePage> {
 
   @override
   void dispose() {
-    _generatedBytesSub?.cancel();
     _generatedImageSub?.cancel();
     _textController.dispose();
     super.dispose();

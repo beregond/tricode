@@ -504,10 +504,7 @@ name = "hub"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "image",
  "messages",
- "rand 0.8.5",
- "rand_chacha 0.3.1",
  "rinf",
  "serde",
  "tokio",
@@ -1173,6 +1170,11 @@ dependencies = [
 [[package]]
 name = "tricode"
 version = "0.1.0"
+dependencies = [
+ "image",
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
+]
 
 [[package]]
 name = "unicode-ident"
