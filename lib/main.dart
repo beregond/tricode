@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:rinf/rinf.dart';
@@ -65,19 +67,42 @@ class MyHomePage extends StatefulWidget {
 
 class _MyHomePageState extends State<MyHomePage> {
   final TextEditingController _textController = TextEditingController();
-  final TextEditingController _widthRatioController = TextEditingController(text: '21');
-  final TextEditingController _heightRatioController = TextEditingController(text: '13');
+  final TextEditingController _widthRatioController = TextEditingController(
+    text: '21',
+  );
+  final TextEditingController _heightRatioController = TextEditingController(
+    text: '13',
+  );
   StreamSubscription<RustSignalPack<GeneratedImage>>? _generatedImageSub;
   Uint8List? _latestImage;
   double _zoomLevel = 1.0;
+  int? _imageWidth;
+  int? _imageHeight;
+
+  bool get _shouldShowZoomControls {
+    if (_imageWidth == null || _imageHeight == null) return false;
+    final containerWidth = MediaQuery.of(context).size.width - 32;
+    final containerHeight = 400.0;
+    return _imageWidth! > containerWidth || _imageHeight! > containerHeight;
+  }
 
   @override
   void initState() {
     super.initState();
-    _generatedImageSub = GeneratedImage.rustSignalStream.listen((signal) {
+    _generatedImageSub = GeneratedImage.rustSignalStream.listen((signal) async {
+      if (!mounted) return;
+      final imageBytes = Uint8List.fromList(signal.message.pngBytes);
+
+      // Decode image to get dimensions
+      final codec = await ui.instantiateImageCodec(imageBytes);
+      final frame = await codec.getNextFrame();
+      final image = frame.image;
+
       if (!mounted) return;
       setState(() {
-        _latestImage = Uint8List.fromList(signal.message.pngBytes);
+        _latestImage = imageBytes;
+        _imageWidth = image.width;
+        _imageHeight = image.height;
         _zoomLevel = 1.0; // Reset zoom when new image is generated
       });
     });
@@ -87,11 +112,11 @@ class _MyHomePageState extends State<MyHomePage> {
     final text = _textController.text;
     final widthRatio = int.tryParse(_widthRatioController.text) ?? 21;
     final heightRatio = int.tryParse(_heightRatioController.text) ?? 13;
-    
+
     // Ensure positive non-zero values
     final safeWidth = widthRatio > 0 ? widthRatio : 21;
     final safeHeight = heightRatio > 0 ? heightRatio : 13;
-    
+
     SmallText(
       text: text,
       widthRatio: safeWidth,
@@ -104,7 +129,10 @@ class _MyHomePageState extends State<MyHomePage> {
 
     try {
       // Generate a default filename with timestamp
-      final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-').split('.')[0];
+      final timestamp = DateTime.now()
+          .toIso8601String()
+          .replaceAll(':', '-')
+          .split('.')[0];
       final defaultName = 'generated_image_$timestamp.png';
 
       if (Platform.isAndroid || Platform.isIOS) {
@@ -112,11 +140,13 @@ class _MyHomePageState extends State<MyHomePage> {
         final directory = Platform.isAndroid
             ? await getExternalStorageDirectory()
             : await getApplicationDocumentsDirectory();
-        
+
         if (directory == null) {
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Could not access storage directory')),
+              const SnackBar(
+                content: Text('Could not access storage directory'),
+              ),
             );
           }
           return;
@@ -127,19 +157,16 @@ class _MyHomePageState extends State<MyHomePage> {
         await file.writeAsBytes(_latestImage!);
 
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Image saved to: $filePath')),
-          );
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('Image saved to: $filePath')));
         }
       } else {
         // For desktop platforms, use file picker
         final filePath = await getSaveLocation(
           suggestedName: defaultName,
           acceptedTypeGroups: [
-            const XTypeGroup(
-              label: 'PNG Images',
-              extensions: ['png'],
-            ),
+            const XTypeGroup(label: 'PNG Images', extensions: ['png']),
           ],
         );
 
@@ -164,9 +191,9 @@ class _MyHomePageState extends State<MyHomePage> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error saving image: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error saving image: $e')));
       }
     }
   }
@@ -224,7 +251,13 @@ class _MyHomePageState extends State<MyHomePage> {
                           ),
                           const Padding(
                             padding: EdgeInsets.symmetric(horizontal: 8.0),
-                            child: Text(':', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+                            child: Text(
+                              ':',
+                              style: TextStyle(
+                                fontSize: 24,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
                           ),
                           Expanded(
                             child: TextField(
@@ -249,49 +282,57 @@ class _MyHomePageState extends State<MyHomePage> {
                     if (_latestImage != null) ...[
                       const Text('Generated image:'),
                       const SizedBox(height: 8),
-                      // Zoom controls
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          IconButton(
-                            icon: const Icon(Icons.zoom_out),
-                            onPressed: () => setState(() {
-                              _zoomLevel = (_zoomLevel - 0.2).clamp(0.5, 5.0);
-                            }),
-                          ),
-                          SizedBox(
-                            width: 150,
-                            child: Slider(
-                              value: _zoomLevel,
-                              min: 0.5,
-                              max: 5.0,
-                              divisions: 45,
-                              label: '${(_zoomLevel * 100).toStringAsFixed(0)}%',
-                              onChanged: (value) => setState(() {
-                                _zoomLevel = value;
+                      // Zoom controls - only show if image is bigger than container
+                      if (_shouldShowZoomControls) ...[
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.zoom_out),
+                              onPressed: () => setState(() {
+                                _zoomLevel = (_zoomLevel - 0.2).clamp(0.5, 5.0);
                               }),
                             ),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.zoom_in),
-                            onPressed: () => setState(() {
-                              _zoomLevel = (_zoomLevel + 0.2).clamp(0.5, 5.0);
-                            }),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.refresh),
-                            onPressed: () => setState(() {
-                              _zoomLevel = 1.0;
-                            }),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
+                            SizedBox(
+                              width: 150,
+                              child: Slider(
+                                value: _zoomLevel,
+                                min: 0.5,
+                                max: 5.0,
+                                divisions: 45,
+                                label:
+                                    '${(_zoomLevel * 100).toStringAsFixed(0)}%',
+                                onChanged: (value) => setState(() {
+                                  _zoomLevel = value;
+                                }),
+                              ),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.zoom_in),
+                              onPressed: () => setState(() {
+                                _zoomLevel = (_zoomLevel + 0.2).clamp(0.5, 5.0);
+                              }),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.refresh),
+                              onPressed: () => setState(() {
+                                _zoomLevel = 1.0;
+                              }),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                      ],
                       // Image preview with zoom and pan
                       Container(
                         constraints: BoxConstraints(
-                          maxWidth: MediaQuery.of(context).size.width - 32,
-                          maxHeight: 400,
+                          minWidth: 300,
+                          minHeight: 200,
+                          maxWidth: max(
+                            300.0,
+                            MediaQuery.of(context).size.width - 32,
+                          ),
+                          maxHeight: max(200.0, 400),
                         ),
                         decoration: BoxDecoration(
                           border: Border.all(color: Colors.grey),
