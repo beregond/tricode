@@ -33,16 +33,27 @@ pub fn generate_image(payload: &str, width_ratio: u32, height_ratio: u32) -> Vec
 fn create_image_from_binary_data(encoded_data: &[u8], width_ratio: u32, height_ratio: u32) -> Vec<u8> {
     const PIXELS_PER_BIT: u32 = 4; // Each bit is a 4x4 square
     
-    // Calculate total bits needed
-    let total_bits = encoded_data.len() * 8;
-    
     // Calculate dimensions maintaining the aspect ratio and ensuring enough bit squares
     let gcd_val = gcd(width_ratio, height_ratio);
-    let normalized_width = width_ratio / gcd_val;
-    let normalized_height = height_ratio / gcd_val;
+    let mut normalized_width = width_ratio / gcd_val;
+    let mut normalized_height = height_ratio / gcd_val;
     
-    // Calculate scaling factor: k^2 * normalized_width * normalized_height >= total_bits
-    let k = ((total_bits as f64) / (normalized_width as f64 * normalized_height as f64))
+    // Ensure normalized_width is odd
+    if normalized_width % 2 == 0 {
+        normalized_width += 1;
+    }
+    
+    // Ensure normalized_height is a multiple of 4
+    if normalized_height % 4 != 0 {
+        normalized_height = ((normalized_height / 4) + 1) * 4;
+    }
+    
+    // Calculate total bits needed
+    let total_bits = encoded_data.len() * 8;
+    let bits_with_offset = total_bits + (normalized_height / 2) as usize;
+    
+    // Calculate scaling factor: k^2 * normalized_width * normalized_height >= bits_with_offset 
+    let k = ((bits_with_offset as f64) / (normalized_width as f64 * normalized_height as f64))
         .sqrt()
         .ceil() as u32;
     
