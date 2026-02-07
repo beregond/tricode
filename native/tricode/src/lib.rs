@@ -118,6 +118,7 @@ fn gcd(mut a: u32, mut b: u32) -> u32 {
 /// - A * B is minimized while satisfying the above constraints
 /// 
 /// Returns (A, B) where A and B are positive integers.
+/// TODO: Double check this math
 pub fn find_optimal_factors(c: u32, x: u32, y: u32) -> (u32, u32) {
     if c == 0 || x == 0 || y == 0 {
         return (1, c.max(1));
@@ -151,9 +152,10 @@ pub fn find_optimal_factors(c: u32, x: u32, y: u32) -> (u32, u32) {
             continue; // Doesn't satisfy constraint
         }
         
-        // Calculate how close A/B is to X/Y, with B adjusted by sqrt(3)/2
+        // Calculate how close ((A + 1) * 0.5) / B is to X/Y, with B adjusted by sqrt(3)/2
+        let a_adjusted = (a as f64 + 1.0) * 0.5;
         let b_adjusted = (b as f64) * (3.0_f64.sqrt() / 2.0);
-        let current_ratio = (a as f64) / b_adjusted;
+        let current_ratio = a_adjusted / b_adjusted;
         let ratio_error = (current_ratio - ratio).abs();
         
         // Prefer solutions with smaller error, then smaller product
@@ -181,8 +183,9 @@ pub fn find_optimal_factors(c: u32, x: u32, y: u32) -> (u32, u32) {
                 continue;
             }
             
+            let a_adjusted = (a as f64 + 1.0) * 0.5;
             let b_adjusted = (b as f64) * (3.0_f64.sqrt() / 2.0);
-            let current_ratio = (a as f64) / b_adjusted;
+            let current_ratio = a_adjusted / b_adjusted;
             let ratio_error = (current_ratio - ratio).abs();
             
             if ratio_error < best_error || (ratio_error == best_error && product < best_product) {
