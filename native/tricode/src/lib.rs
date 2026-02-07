@@ -32,34 +32,26 @@ pub fn generate_image(payload: &str, width_ratio: u32, height_ratio: u32) -> Vec
 /// Each bit is represented by a 4x4 square of pixels.
 fn create_image_from_binary_data(encoded_data: &[u8], width_ratio: u32, height_ratio: u32) -> Vec<u8> {
     const PIXELS_PER_BIT: u32 = 4; // Each bit is a 4x4 square
+
+    // Calculate total bits needed
+    let total_bits = encoded_data.len() * 8;
     
     // Calculate dimensions maintaining the aspect ratio and ensuring enough bit squares
     let gcd_val = gcd(width_ratio, height_ratio);
     let mut normalized_width = width_ratio / gcd_val;
     let mut normalized_height = height_ratio / gcd_val;
-    
-    // Ensure normalized_width is odd
-    if normalized_width % 2 == 0 {
-        normalized_width += 1;
+
+    // Find optimal integer dimensions using the previously written function
+    let (mut width_squares, mut height_squares) =
+        find_optimal_factors(total_bits as u32, normalized_width, normalized_height);
+
+    // Ensure width is odd and height is a multiple of 2 (round up if necessary)
+    if width_squares % 2 == 0 {
+        width_squares += 1;
     }
-    
-    // Ensure normalized_height is a multiple of 4
-    if normalized_height % 4 != 0 {
-        normalized_height = ((normalized_height / 4) + 1) * 4;
+    if height_squares % 2 != 0 {
+        height_squares += 1;
     }
-    
-    // Calculate total bits needed
-    let total_bits = encoded_data.len() * 8;
-    let bits_with_offset = total_bits + (normalized_height / 2) as usize;
-    
-    // Calculate scaling factor: k^2 * normalized_width * normalized_height >= bits_with_offset 
-    let k = ((bits_with_offset as f64) / (normalized_width as f64 * normalized_height as f64))
-        .sqrt()
-        .ceil() as u32;
-    
-    // Dimensions in bit squares
-    let width_squares = normalized_width * k.max(1);
-    let height_squares = normalized_height * k.max(1);
     
     // Actual pixel dimensions
     let width = width_squares * PIXELS_PER_BIT;
@@ -118,6 +110,97 @@ fn gcd(mut a: u32, mut b: u32) -> u32 {
         a = temp;
     }
     a
+}
+
+/// Finds two factors A and B such that:
+/// - A * B >= C
+/// - The ratio A/B is as close as possible to X/Y
+/// - A * B is minimized while satisfying the above constraints
+/// 
+/// Returns (A, B) where A and B are positive integers.
+pub fn find_optimal_factors(c: u32, x: u32, y: u32) -> (u32, u32) {
+    if c == 0 || x == 0 || y == 0 {
+        return (1, c.max(1));
+    }
+    
+    // Ideal ratio r = X/Y
+    // We want A/B ≈ X/Y, so A ≈ B * X/Y
+    // With A * B >= C, we get: B * (B * X/Y) >= C
+    // Therefore: B >= sqrt(C * Y/X)
+    
+    let ratio = (x as f64) / (y as f64);
+    let b_ideal = ((c as f64 * y as f64) / (x as f64)).sqrt();
+    
+    // Start from the ideal B and search for the best integer solution
+    let b_start = b_ideal.floor() as u32;
+    let b_start = b_start.max(1);
+    
+    let mut best_a = 0;
+    let mut best_b = 0;
+    let mut best_error = f64::INFINITY;
+    let mut best_product = u32::MAX;
+    
+    // Search in a range around the ideal value
+    for b in b_start..=(b_start + 100).max(b_start * 2) {
+        // Calculate minimum A such that A * B >= C
+        let a = ((c as f64) / (b as f64)).ceil() as u32;
+        let a = a.max(1);
+        
+        let product = a * b;
+        if product < c {
+            continue; // Doesn't satisfy constraint
+        }
+        
+        // Calculate how close A/B is to X/Y, with B adjusted by sqrt(3)/2
+        let b_adjusted = (b as f64) * (3.0_f64.sqrt() / 2.0);
+        let current_ratio = (a as f64) / b_adjusted;
+        let ratio_error = (current_ratio - ratio).abs();
+        
+        // Prefer solutions with smaller error, then smaller product
+        if ratio_error < best_error || (ratio_error == best_error && product < best_product) {
+            best_error = ratio_error;
+            best_product = product;
+            best_a = a;
+            best_b = b;
+        }
+        
+        // Early exit if we found exact match
+        if ratio_error < 0.001 && product >= c {
+            break;
+        }
+    }
+    
+    // If no solution found in forward search, try backward
+    if best_a == 0 {
+        for b in (1..=b_start).rev() {
+            let a = ((c as f64) / (b as f64)).ceil() as u32;
+            let a = a.max(1);
+            
+            let product = a * b;
+            if product < c {
+                continue;
+            }
+            
+            let b_adjusted = (b as f64) * (3.0_f64.sqrt() / 2.0);
+            let current_ratio = (a as f64) / b_adjusted;
+            let ratio_error = (current_ratio - ratio).abs();
+            
+            if ratio_error < best_error || (ratio_error == best_error && product < best_product) {
+                best_error = ratio_error;
+                best_product = product;
+                best_a = a;
+                best_b = b;
+            }
+        }
+    }
+    
+    // Fallback: if still no solution, return a valid one
+    if best_a == 0 {
+        best_a = c;
+        best_b = 1;
+    }
+    
+    (best_a, best_b)
 }
 
 /// Applies Reed-Solomon error correction codes to the input data.
