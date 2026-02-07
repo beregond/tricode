@@ -31,7 +31,8 @@ pub fn generate_image(payload: &str, width_ratio: u32, height_ratio: u32) -> Vec
 /// Binary data is encoded as: 0 bits = white pixels, 1 bits = black pixels.
 /// Each bit is represented by a 4x4 square of pixels.
 fn create_image_from_binary_data(encoded_data: &[u8], width_ratio: u32, height_ratio: u32) -> Vec<u8> {
-    const PIXELS_PER_BIT: u32 = 4; // Each bit is a 4x4 square
+    const PIXELS_PER_BIT_WIDTH: u32 = 5; // Bit box width in pixels
+    let pixels_per_bit_height = ((PIXELS_PER_BIT_WIDTH as f64) * (3.0_f64.sqrt() / 2.0)).ceil() as u32;
 
     // Calculate total bits needed
     let total_bits = encoded_data.len() * 8;
@@ -54,8 +55,8 @@ fn create_image_from_binary_data(encoded_data: &[u8], width_ratio: u32, height_r
     }
     
     // Actual pixel dimensions
-    let width = width_squares * PIXELS_PER_BIT;
-    let height = height_squares * PIXELS_PER_BIT;
+    let width = width_squares * PIXELS_PER_BIT_WIDTH;
+    let height = height_squares * pixels_per_bit_height;
     
     let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::new(width, height);
 
@@ -77,12 +78,34 @@ fn create_image_from_binary_data(encoded_data: &[u8], width_ratio: u32, height_r
             let color = if bit == 0 { 255 } else { 0 };
             let rgba = Rgba([color, color, color, 255]);
             
-            // Fill the 4x4 square
-            for dy in 0..PIXELS_PER_BIT {
-                for dx in 0..PIXELS_PER_BIT {
-                    let px = square_x * PIXELS_PER_BIT + dx;
-                    let py = square_y * PIXELS_PER_BIT + dy;
-                    img.put_pixel(px, py, rgba);
+            // Fill the equilateral triangle
+            let mut pointing_down = square_x % 2 == 0;
+            if square_y % 2 == 1 {
+                pointing_down = !pointing_down;
+            }
+
+            let w = PIXELS_PER_BIT_WIDTH as f64;
+            let h = pixels_per_bit_height as f64;
+            let center_x = (w - 1.0) / 2.0;
+            let denom = (h - 1.0).max(1.0);
+
+            for dy in 0..pixels_per_bit_height {
+                for dx in 0..PIXELS_PER_BIT_WIDTH {
+                    let y = dy as f64;
+                    let x = dx as f64;
+                    let t = y / denom;
+
+                    let half_width = if pointing_down {
+                        (w / 2.0) * (1.0 - t)
+                    } else {
+                        (w / 2.0) * t
+                    };
+
+                    if (x - center_x).abs() <= half_width {
+                        let px = square_x * PIXELS_PER_BIT_WIDTH + dx;
+                        let py = square_y * pixels_per_bit_height + dy;
+                        img.put_pixel(px, py, rgba);
+                    }
                 }
             }
         }
