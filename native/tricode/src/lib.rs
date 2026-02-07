@@ -6,6 +6,7 @@ use image::{ExtendedColorType, ImageBuffer, ImageEncoder, Rgba};
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
 use rand::SeedableRng;
+use reed_solomon_erasure::galois_8::ReedSolomon;
 
 pub fn generate_code(message: &str) -> Vec<u8> {
     // Return the input string as raw bytes for now.
@@ -13,9 +14,18 @@ pub fn generate_code(message: &str) -> Vec<u8> {
 }
 
 /// Generates a pseudo-random PNG image seeded by the payload text.
+/// The payload is first encoded with Reed-Solomon error correction before being used as seed.
 pub fn generate_image(payload: &str, width_ratio: u32, height_ratio: u32) -> Vec<u8> {
+    // Convert payload to bytes and apply Reed-Solomon encoding
+    let payload_bytes = payload.as_bytes().to_vec();
+    let encoded_data = match reed_solomon_encode(payload_bytes) {
+        Ok(data) => data,
+        Err(_) => return Vec::new(), // Return empty on encoding error
+    };
+
+    // Hash the encoded data to generate seed
     let mut hasher = DefaultHasher::new();
-    payload.hash(&mut hasher);
+    encoded_data.hash(&mut hasher);
     let seed = hasher.finish();
 
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
@@ -62,4 +72,130 @@ fn gcd(mut a: u32, mut b: u32) -> u32 {
         a = temp;
     }
     a
+}
+
+/// Applies Reed-Solomon error correction codes to the input data.
+/// The function adds parity shards (10 by default) to enable error correction.
+/// Returns the encoded data with both data and parity shards concatenated.
+pub fn reed_solomon_encode(data: Vec<u8>) -> Result<Vec<u8>, String> {
+    if data.is_empty() {
+        return Err("Input data is empty".to_string());
+    }
+
+    // Number of data shards and parity shards
+    let data_shard_count = 10;
+    let parity_shard_count = 10;
+    
+    // Create Reed-Solomon encoder
+    let rs = ReedSolomon::new(data_shard_count, parity_shard_count)
+        .map_err(|e| format!("Failed to create Reed-Solomon encoder: {:?}", e))?;
+    
+    // Calculate shard size (round up to accommodate all data)
+    let shard_size = (data.len() + data_shard_count - 1) / data_shard_count;
+    
+    // Create shards: split data into data_shard_count shards
+    let mut shards = Vec::new();
+    for i in 0..data_shard_count {
+        let start = i * shard_size;
+        let end = ((i + 1) * shard_size).min(data.len());
+        
+        let mut shard = if start < data.len() {
+            data[start..end].to_vec()
+        } else {
+            Vec::new()
+        };
+        
+        // Pad to shard_size
+        shard.resize(shard_size, 0);
+        shards.push(shard);
+    }
+    
+    // Add empty parity shards
+    for _ in 0..parity_shard_count {
+        shards.push(vec![0u8; shard_size]);
+    }
+    
+    // Encode to generate parity shards
+    rs.encode(&mut shards)
+        .map_err(|e| format!("Failed to encode: {:?}", e))?;
+    
+    // Prepare output: original data length (4 bytes) + shard size (4 bytes) + all shards
+    let mut result = Vec::new();
+    result.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    result.extend_from_slice(&(shard_size as u32).to_le_bytes());
+    
+    // Concatenate all shards
+    for shard in shards {
+        result.extend_from_slice(&shard);
+    }
+    
+    Ok(result)
+}
+
+/// Decodes and corrects data that was encoded with Reed-Solomon error correction.
+/// Can recover from up to parity_shard_count corrupted or missing shards.
+/// Returns the original data.
+pub fn reed_solomon_decode(encoded_data: Vec<u8>) -> Result<Vec<u8>, String> {
+    if encoded_data.len() < 8 {
+        return Err("Encoded data is too short".to_string());
+    }
+    
+    // Read metadata
+    let original_len = u32::from_le_bytes([
+        encoded_data[0],
+        encoded_data[1],
+        encoded_data[2],
+        encoded_data[3],
+    ]) as usize;
+    
+    let shard_size = u32::from_le_bytes([
+        encoded_data[4],
+        encoded_data[5],
+        encoded_data[6],
+        encoded_data[7],
+    ]) as usize;
+    
+    let data_shard_count = 10;
+    let parity_shard_count = 10;
+    let total_shards = data_shard_count + parity_shard_count;
+    
+    // Validate encoded data length
+    let expected_len = 8 + (total_shards * shard_size);
+    if encoded_data.len() != expected_len {
+        return Err(format!(
+            "Invalid encoded data length: expected {}, got {}",
+            expected_len,
+            encoded_data.len()
+        ));
+    }
+    
+    // Create Reed-Solomon decoder
+    let rs = ReedSolomon::new(data_shard_count, parity_shard_count)
+        .map_err(|e| format!("Failed to create Reed-Solomon decoder: {:?}", e))?;
+    
+    // Extract shards
+    let mut shards = Vec::new();
+    let mut offset = 8;
+    for _ in 0..total_shards {
+        let shard = encoded_data[offset..offset + shard_size].to_vec();
+        shards.push(Some(shard));
+        offset += shard_size;
+    }
+    
+    // Verify and reconstruct if needed
+    rs.reconstruct(&mut shards)
+        .map_err(|e| format!("Failed to reconstruct: {:?}", e))?;
+    
+    // Extract original data from data shards
+    let mut result = Vec::new();
+    for i in 0..data_shard_count {
+        if let Some(ref shard) = shards[i] {
+            result.extend_from_slice(shard);
+        }
+    }
+    
+    // Trim to original length
+    result.truncate(original_len);
+    
+    Ok(result)
 }
