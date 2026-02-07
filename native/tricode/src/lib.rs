@@ -24,10 +24,19 @@ pub fn generate_image(payload: &str, width_ratio: u32, height_ratio: u32) -> Vec
         Err(_) => return Vec::new(), // Return empty on encoding error
     };
 
+    create_image_from_binary_data(&encoded_data, width_ratio, height_ratio)
+}
+
+/// Creates a PNG image from binary data maintaining the specified aspect ratio.
+/// Binary data is encoded as: 0 bits = white pixels, 1 bits = black pixels.
+/// Each bit is represented by a 4x4 square of pixels.
+fn create_image_from_binary_data(encoded_data: &[u8], width_ratio: u32, height_ratio: u32) -> Vec<u8> {
+    const PIXELS_PER_BIT: u32 = 4; // Each bit is a 4x4 square
+    
     // Calculate total bits needed
     let total_bits = encoded_data.len() * 8;
     
-    // Calculate dimensions maintaining the aspect ratio and ensuring enough pixels
+    // Calculate dimensions maintaining the aspect ratio and ensuring enough bit squares
     let gcd_val = gcd(width_ratio, height_ratio);
     let normalized_width = width_ratio / gcd_val;
     let normalized_height = height_ratio / gcd_val;
@@ -37,27 +46,43 @@ pub fn generate_image(payload: &str, width_ratio: u32, height_ratio: u32) -> Vec
         .sqrt()
         .ceil() as u32;
     
-    let width = normalized_width * k.max(1);
-    let height = normalized_height * k.max(1);
+    // Dimensions in bit squares
+    let width_squares = normalized_width * k.max(1);
+    let height_squares = normalized_height * k.max(1);
+    
+    // Actual pixel dimensions
+    let width = width_squares * PIXELS_PER_BIT;
+    let height = height_squares * PIXELS_PER_BIT;
     
     let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::new(width, height);
 
-    // Fill image with encoded data bits
+    // Fill image with encoded data bits (each bit as a 4x4 square)
     let mut bit_index = 0;
-    for pixel in img.pixels_mut() {
-        let bit = if bit_index < total_bits {
-            let byte_index = bit_index / 8;
-            let bit_offset = 7 - (bit_index % 8); // MSB first
-            let bit_value = (encoded_data[byte_index] >> bit_offset) & 1;
-            bit_index += 1;
-            bit_value
-        } else {
-            0 // Fill remaining pixels with 0 (white)
-        };
-        
-        // 0 = white, 1 = black
-        let color = if bit == 0 { 255 } else { 0 };
-        *pixel = Rgba([color, color, color, 255]);
+    for square_y in 0..height_squares {
+        for square_x in 0..width_squares {
+            let bit = if bit_index < total_bits {
+                let byte_index = bit_index / 8;
+                let bit_offset = 7 - (bit_index % 8); // MSB first
+                let bit_value = (encoded_data[byte_index] >> bit_offset) & 1;
+                bit_index += 1;
+                bit_value
+            } else {
+                0 // Fill remaining squares with 0 (white)
+            };
+            
+            // 0 = white, 1 = black
+            let color = if bit == 0 { 255 } else { 0 };
+            let rgba = Rgba([color, color, color, 255]);
+            
+            // Fill the 4x4 square
+            for dy in 0..PIXELS_PER_BIT {
+                for dx in 0..PIXELS_PER_BIT {
+                    let px = square_x * PIXELS_PER_BIT + dx;
+                    let py = square_y * PIXELS_PER_BIT + dy;
+                    img.put_pixel(px, py, rgba);
+                }
+            }
+        }
     }
 
     let mut png_bytes = Vec::new();
