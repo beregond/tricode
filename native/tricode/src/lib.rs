@@ -149,35 +149,42 @@ fn gcd(mut a: u32, mut b: u32) -> u32 {
 
 /// Finds two factors A and B such that:
 /// - A * B >= C
-/// - The ratio A/B is as close as possible to X/Y
+/// - The ratio ((A+1)/2) / (B * sqrt(3)/2) is as close as possible to X/Y
 /// - A * B is minimized while satisfying the above constraints
 /// 
 /// Returns (A, B) where A and B are positive integers.
-/// TODO: Double check this math
 pub fn find_optimal_factors(c: u32, x: u32, y: u32) -> (u32, u32) {
     if c == 0 || x == 0 || y == 0 {
         return (1, c.max(1));
     }
     
-    // Ideal ratio r = X/Y
-    // We want A/B ≈ X/Y, so A ≈ B * X/Y
-    // With A * B >= C, we get: B * (B * X/Y) >= C
-    // Therefore: B >= sqrt(C * Y/X)
+    // Target ratio: X/Y
+    // We want: ((A+1)/2) / (B * sqrt(3)/2) ≈ X/Y
+    // Simplifying: (A+1) / (B * sqrt(3)) ≈ X/Y
+    // Therefore: A ≈ B * sqrt(3) * X/Y - 1
+    // 
+    // With constraint A * B >= C:
+    // (B * sqrt(3) * X/Y - 1) * B >= C (approximately)
+    // B^2 * sqrt(3) * X/Y >= C
+    // B >= sqrt(C * Y / (sqrt(3) * X))
     
-    let ratio = (x as f64) / (y as f64);
-    let b_ideal = ((c as f64 * y as f64) / (x as f64)).sqrt();
+    let target_ratio = (x as f64) / (y as f64);
+    let sqrt3 = 3.0_f64.sqrt();
     
-    // Start from the ideal B and search for the best integer solution
-    let b_start = b_ideal.floor() as u32;
-    let b_start = b_start.max(1);
+    // Calculate ideal starting point for B
+    let b_ideal = ((c as f64 * y as f64) / (sqrt3 * x as f64)).sqrt();
+    let b_start = b_ideal.floor().max(1.0) as u32;
     
-    let mut best_a = 0;
-    let mut best_b = 0;
-    let mut best_error = f64::INFINITY;
-    let mut best_product = u32::MAX;
+    let mut best_solution: Option<(u32, u32, f64, u32)> = None; // (A, B, error, product)
     
-    // Search in a range around the ideal value
-    for b in b_start..=(b_start + 100).max(b_start * 2) {
+    // Search for the best solution in a range around the ideal B
+    let search_range = (b_start.saturating_sub(50))..=(b_start + 200);
+    
+    for b in search_range {
+        if b == 0 {
+            continue;
+        }
+        
         // Calculate minimum A such that A * B >= C
         let a = ((c as f64) / (b as f64)).ceil() as u32;
         let a = a.max(1);
@@ -187,58 +194,37 @@ pub fn find_optimal_factors(c: u32, x: u32, y: u32) -> (u32, u32) {
             continue; // Doesn't satisfy constraint
         }
         
-        // Calculate how close ((A + 1) * 0.5) / B is to X/Y, with B adjusted by sqrt(3)/2
-        let a_adjusted = (a as f64 + 1.0) * 0.5;
-        let b_adjusted = (b as f64) * (3.0_f64.sqrt() / 2.0);
-        let current_ratio = a_adjusted / b_adjusted;
-        let ratio_error = (current_ratio - ratio).abs();
+        // Calculate actual ratio: ((A+1)/2) / (B * sqrt(3)/2)
+        let actual_ratio = ((a as f64 + 1.0) / 2.0) / ((b as f64) * sqrt3 / 2.0);
+        let ratio_error = (actual_ratio - target_ratio).abs();
         
-        // Prefer solutions with smaller error, then smaller product
-        if ratio_error < best_error || (ratio_error == best_error && product < best_product) {
-            best_error = ratio_error;
-            best_product = product;
-            best_a = a;
-            best_b = b;
-        }
-        
-        // Early exit if we found exact match
-        if ratio_error < 0.001 && product >= c {
-            break;
-        }
-    }
-    
-    // If no solution found in forward search, try backward
-    if best_a == 0 {
-        for b in (1..=b_start).rev() {
-            let a = ((c as f64) / (b as f64)).ceil() as u32;
-            let a = a.max(1);
-            
-            let product = a * b;
-            if product < c {
-                continue;
+        // Update best solution if:
+        // 1. This is the first valid solution, OR
+        // 2. This has a smaller ratio error, OR
+        // 3. Same ratio error but smaller product
+        let is_better = match best_solution {
+            None => true,
+            Some((_, _, best_err, best_prod)) => {
+                ratio_error < best_err || 
+                (ratio_error == best_err && product < best_prod)
             }
+        };
+        
+        if is_better {
+            best_solution = Some((a, b, ratio_error, product));
             
-            let a_adjusted = (a as f64 + 1.0) * 0.5;
-            let b_adjusted = (b as f64) * (3.0_f64.sqrt() / 2.0);
-            let current_ratio = a_adjusted / b_adjusted;
-            let ratio_error = (current_ratio - ratio).abs();
-            
-            if ratio_error < best_error || (ratio_error == best_error && product < best_product) {
-                best_error = ratio_error;
-                best_product = product;
-                best_a = a;
-                best_b = b;
+            // Early exit if we found a very good match
+            if ratio_error < 0.0001 {
+                break;
             }
         }
     }
     
-    // Fallback: if still no solution, return a valid one
-    if best_a == 0 {
-        best_a = c;
-        best_b = 1;
+    // Return best solution or fallback
+    match best_solution {
+        Some((a, b, _, _)) => (a, b),
+        None => (c, 1), // Fallback: always satisfies A * B >= C
     }
-    
-    (best_a, best_b)
 }
 
 /// Applies Reed-Solomon error correction codes to the input data.
