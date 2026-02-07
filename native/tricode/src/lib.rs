@@ -31,7 +31,7 @@ pub fn generate_image(payload: &str, width_ratio: u32, height_ratio: u32) -> Vec
 /// Binary data is encoded as: 0 bits = white pixels, 1 bits = black pixels.
 /// Each bit is represented by a 4x4 square of pixels.
 fn create_image_from_binary_data(encoded_data: &[u8], width_ratio: u32, height_ratio: u32) -> Vec<u8> {
-    const PIXELS_PER_BIT_WIDTH: u32 = 21; // Bit box width in pixels
+    const PIXELS_PER_BIT_WIDTH: u32 = 51; // Bit box width in pixels
     let pixels_per_bit_height = ((PIXELS_PER_BIT_WIDTH as f64) * (3.0_f64.sqrt() / 2.0)).ceil() as u32;
 
     // Calculate total bits needed
@@ -46,14 +46,6 @@ fn create_image_from_binary_data(encoded_data: &[u8], width_ratio: u32, height_r
     let (mut width_squares, mut height_squares) =
         find_optimal_factors(total_bits as u32, normalized_width, normalized_height);
 
-    // Ensure width is odd and height is a multiple of 2 (round up if necessary)
-    if width_squares % 2 == 0 {
-        width_squares += 1;
-    }
-    if height_squares % 2 != 0 {
-        height_squares += 1;
-    }
-    
     // Actual pixel dimensions
     let width = ((width_squares + 1) / 2) * PIXELS_PER_BIT_WIDTH;
     let height = height_squares * pixels_per_bit_height;
@@ -149,6 +141,8 @@ fn gcd(mut a: u32, mut b: u32) -> u32 {
 
 /// Finds two factors A and B such that:
 /// - A * B >= C
+/// - A must be odd
+/// - B must be a multiple of 2 (even)
 /// - The ratio ((A+1)/2) / (B * sqrt(3)/2) is as close as possible to X/Y
 /// - A * B is minimized while satisfying the above constraints
 /// 
@@ -171,23 +165,30 @@ pub fn find_optimal_factors(c: u32, x: u32, y: u32) -> (u32, u32) {
     let target_ratio = (x as f64) / (y as f64);
     let sqrt3 = 3.0_f64.sqrt();
     
-    // Calculate ideal starting point for B
+    // Calculate ideal starting point for B (must be even)
     let b_ideal = ((c as f64 * y as f64) / (sqrt3 * x as f64)).sqrt();
-    let b_start = b_ideal.floor().max(1.0) as u32;
+    let mut b_start = b_ideal.floor().max(2.0) as u32;
+    // Ensure b_start is even
+    if b_start % 2 != 0 {
+        b_start += 1;
+    }
     
     let mut best_solution: Option<(u32, u32, f64, u32)> = None; // (A, B, error, product)
     
     // Search for the best solution in a range around the ideal B
-    let search_range = (b_start.saturating_sub(50))..=(b_start + 200);
+    // Only consider even values for B
+    let search_start = b_start.saturating_sub(100).max(2);
+    let search_end = b_start + 200;
     
-    for b in search_range {
-        if b == 0 {
-            continue;
-        }
-        
+    for b in (search_start..=search_end).step_by(2) {
         // Calculate minimum A such that A * B >= C
-        let a = ((c as f64) / (b as f64)).ceil() as u32;
-        let a = a.max(1);
+        let mut a = ((c as f64) / (b as f64)).ceil() as u32;
+        a = a.max(1);
+        
+        // Ensure A is odd
+        if a % 2 == 0 {
+            a += 1;
+        }
         
         let product = a * b;
         if product < c {
@@ -223,7 +224,14 @@ pub fn find_optimal_factors(c: u32, x: u32, y: u32) -> (u32, u32) {
     // Return best solution or fallback
     match best_solution {
         Some((a, b, _, _)) => (a, b),
-        None => (c, 1), // Fallback: always satisfies A * B >= C
+        None => {
+            // Fallback: ensure A is odd and B is even
+            let mut a = c;
+            if a % 2 == 0 {
+                a += 1;
+            }
+            (a, 2)
+        }
     }
 }
 
