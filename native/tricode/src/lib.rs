@@ -13,8 +13,9 @@ pub fn generate_code(message: &str) -> Vec<u8> {
     message.as_bytes().to_vec()
 }
 
-/// Generates a pseudo-random PNG image seeded by the payload text.
-/// The payload is first encoded with Reed-Solomon error correction before being used as seed.
+/// Generates a PNG image encoding the payload text.
+/// The payload is first encoded with Reed-Solomon error correction,
+/// then the binary data is visualized as pixels: 0 bits = white, 1 bits = black.
 pub fn generate_image(payload: &str, width_ratio: u32, height_ratio: u32) -> Vec<u8> {
     // Convert payload to bytes and apply Reed-Solomon encoding
     let payload_bytes = payload.as_bytes().to_vec();
@@ -23,31 +24,40 @@ pub fn generate_image(payload: &str, width_ratio: u32, height_ratio: u32) -> Vec
         Err(_) => return Vec::new(), // Return empty on encoding error
     };
 
-    // Hash the encoded data to generate seed
-    let mut hasher = DefaultHasher::new();
-    encoded_data.hash(&mut hasher);
-    let seed = hasher.finish();
-
-    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    // Calculate total bits needed
+    let total_bits = encoded_data.len() * 8;
     
-    // Calculate dimensions based on ratio, keeping a reasonable size
-    let base_size = 128u32;
-    let gcd = gcd(width_ratio, height_ratio);
-    let normalized_width = width_ratio / gcd;
-    let normalized_height = height_ratio / gcd;
+    // Calculate dimensions maintaining the aspect ratio and ensuring enough pixels
+    let gcd_val = gcd(width_ratio, height_ratio);
+    let normalized_width = width_ratio / gcd_val;
+    let normalized_height = height_ratio / gcd_val;
     
-    // Scale to get reasonable image size
-    let scale = base_size / normalized_width.max(normalized_height);
-    let width = normalized_width * scale.max(1);
-    let height = normalized_height * scale.max(1);
+    // Calculate scaling factor: k^2 * normalized_width * normalized_height >= total_bits
+    let k = ((total_bits as f64) / (normalized_width as f64 * normalized_height as f64))
+        .sqrt()
+        .ceil() as u32;
+    
+    let width = normalized_width * k.max(1);
+    let height = normalized_height * k.max(1);
     
     let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::new(width, height);
 
+    // Fill image with encoded data bits
+    let mut bit_index = 0;
     for pixel in img.pixels_mut() {
-        let r: u8 = rng.gen_range(0..=255);
-        let g: u8 = rng.gen_range(0..=255);
-        let b: u8 = rng.gen_range(0..=255);
-        *pixel = Rgba([r, g, b, 255]);
+        let bit = if bit_index < total_bits {
+            let byte_index = bit_index / 8;
+            let bit_offset = 7 - (bit_index % 8); // MSB first
+            let bit_value = (encoded_data[byte_index] >> bit_offset) & 1;
+            bit_index += 1;
+            bit_value
+        } else {
+            0 // Fill remaining pixels with 0 (white)
+        };
+        
+        // 0 = white, 1 = black
+        let color = if bit == 0 { 255 } else { 0 };
+        *pixel = Rgba([color, color, color, 255]);
     }
 
     let mut png_bytes = Vec::new();
