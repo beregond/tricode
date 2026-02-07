@@ -55,7 +55,7 @@ fn create_image_from_binary_data(encoded_data: &[u8], width_ratio: u32, height_r
     }
     
     // Actual pixel dimensions
-    let width = width_squares * PIXELS_PER_BIT_WIDTH;
+    let width = ((width_squares + 1) / 2) * PIXELS_PER_BIT_WIDTH;
     let height = height_squares * pixels_per_bit_height;
     
     let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::new(width, height);
@@ -75,7 +75,7 @@ fn create_image_from_binary_data(encoded_data: &[u8], width_ratio: u32, height_r
             };
             
             // 0 = white, 1 = black
-            let (color, border) = if bit == 0 { (255, 0) } else { (0, 255) };
+            let (color, border) = if bit == 0 { (255, 255) } else { (0, 255) };
             let rgba = Rgba([color, color, color, 255]);
             
             // Fill the equilateral triangle with border
@@ -103,7 +103,8 @@ fn create_image_from_binary_data(encoded_data: &[u8], width_ratio: u32, height_r
                     };
 
                     if (x - center_x).abs() <= half_width {
-                        let px = square_x * PIXELS_PER_BIT_WIDTH + dx;
+                        let base_x = square_x * (PIXELS_PER_BIT_WIDTH / 2);
+                        let px = base_x + dx;
                         let py = square_y * pixels_per_bit_height + dy;
 
                         // Check if this pixel is on a border
