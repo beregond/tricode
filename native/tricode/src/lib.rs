@@ -31,7 +31,7 @@ pub fn generate_image(payload: &str, width_ratio: u32, height_ratio: u32) -> Vec
 /// Binary data is encoded as: 0 bits = white pixels, 1 bits = black pixels.
 /// Each bit is represented by a 4x4 square of pixels.
 fn create_image_from_binary_data(encoded_data: &[u8], width_ratio: u32, height_ratio: u32) -> Vec<u8> {
-    const PIXELS_PER_BIT_WIDTH: u32 = 5; // Bit box width in pixels
+    const PIXELS_PER_BIT_WIDTH: u32 = 21; // Bit box width in pixels
     let pixels_per_bit_height = ((PIXELS_PER_BIT_WIDTH as f64) * (3.0_f64.sqrt() / 2.0)).ceil() as u32;
 
     // Calculate total bits needed
@@ -75,10 +75,10 @@ fn create_image_from_binary_data(encoded_data: &[u8], width_ratio: u32, height_r
             };
             
             // 0 = white, 1 = black
-            let color = if bit == 0 { 255 } else { 0 };
+            let (color, border) = if bit == 0 { (255, 0) } else { (0, 255) };
             let rgba = Rgba([color, color, color, 255]);
             
-            // Fill the equilateral triangle
+            // Fill the equilateral triangle with border
             let mut pointing_down = square_x % 2 == 0;
             if square_y % 2 == 1 {
                 pointing_down = !pointing_down;
@@ -88,6 +88,7 @@ fn create_image_from_binary_data(encoded_data: &[u8], width_ratio: u32, height_r
             let h = pixels_per_bit_height as f64;
             let center_x = (w - 1.0) / 2.0;
             let denom = (h - 1.0).max(1.0);
+            let border_color = Rgba([border, border, border, 255]);
 
             for dy in 0..pixels_per_bit_height {
                 for dx in 0..PIXELS_PER_BIT_WIDTH {
@@ -104,7 +105,17 @@ fn create_image_from_binary_data(encoded_data: &[u8], width_ratio: u32, height_r
                     if (x - center_x).abs() <= half_width {
                         let px = square_x * PIXELS_PER_BIT_WIDTH + dx;
                         let py = square_y * pixels_per_bit_height + dy;
-                        img.put_pixel(px, py, rgba);
+
+                        // Check if this pixel is on a border
+                        // TODO: maybe simpler?
+                        let is_base = if pointing_down { dy == 0 } else { dy == pixels_per_bit_height - 1 };
+                        let is_tip = if pointing_down { dy == pixels_per_bit_height - 1 } else { dy == 0 };
+                        let is_left_edge = (x - center_x).abs() >= half_width - 0.5;
+                        let is_right_edge = (x - center_x).abs() >= half_width - 1.5;
+
+                        let use_border = is_base || is_tip || is_left_edge || is_right_edge;
+                        let pixel_color = if use_border { border_color } else { rgba };
+                        img.put_pixel(px, py, pixel_color);
                     }
                 }
             }
