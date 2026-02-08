@@ -26,9 +26,14 @@ impl Notifiable<ImageBytes> for DecodeActor {
     async fn notify(&mut self, msg: ImageBytes, _: &Context<Self>) {
         debug_print!("Received {} bytes to decode", msg.bytes.len());
         
-        // TODO: Implement actual decoding logic
-        // For now, return dummy text
-        let decoded = format!("Dummy decoded text from {} bytes", msg.bytes.len());
+        // Decode the image using the tricode crate
+        let decoded = match tricode::decode_image(&msg.bytes) {
+            Ok(text) => text,
+            Err(e) => {
+                debug_print!("Error decoding image: {}", e);
+                format!("Error decoding image: {}", e)
+            }
+        };
         
         DecodedText {
             text: decoded,

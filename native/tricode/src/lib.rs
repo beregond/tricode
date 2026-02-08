@@ -394,3 +394,22 @@ pub fn reed_solomon_decode(encoded_data: Vec<u8>) -> Result<Vec<u8>, String> {
     
     Ok(result)
 }
+
+
+/// Decodes a PNG image back to the original text payload.
+/// Currently returns dummy text for testing.
+/// TODO: Implement actual image decoding and Reed-Solomon error correction.
+pub fn decode_image(png_bytes: &[u8]) -> Result<String, String> {
+    if png_bytes.is_empty() {
+        return Err("Empty image data".to_string());
+    }
+    
+    // TODO: Implement actual decoding:
+    // 1. Decode PNG to get pixel data
+    // 2. Extract binary data from triangles
+    // 3. Apply Reed-Solomon decoding
+    // 4. Convert bytes back to UTF-8 string
+    
+    // For now, return dummy text
+    Ok(format!("Decoded dummy text from {} bytes of PNG data", png_bytes.len()))
+}

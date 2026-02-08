@@ -385,10 +385,50 @@ class _MyHomePageState extends State<MyHomePage> {
                       const Text('Generating image...'),
                       const SizedBox(height: 20),
                     ] else if (_latestImage != null) ...[
-                      const Text('Generated image:'),
-                      const SizedBox(height: 8),
+                      const Divider(height: 40, thickness: 1),
+                      ElevatedButton.icon(
+                        onPressed: _downloadImage,
+                        icon: const Icon(Icons.download),
+                        label: const Text('Download Image'),
+                      ),
+                      const SizedBox(height: 16),
+                      // Image preview with zoom and pan
+                      Container(
+                        constraints: BoxConstraints(
+                          minWidth: 300,
+                          minHeight: 200,
+                          maxWidth: max(
+                            300.0,
+                            MediaQuery.of(context).size.width - 32,
+                          ),
+                          maxHeight: max(200.0, 400),
+                        ),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.grey),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(7),
+                          child: InteractiveViewer(
+                            transformationController:
+                                TransformationController(),
+                            boundaryMargin: const EdgeInsets.all(20),
+                            minScale: 0.5,
+                            maxScale: 5.0,
+                            clipBehavior: Clip.hardEdge,
+                            child: Transform.scale(
+                              scale: _zoomLevel,
+                              child: Image.memory(
+                                _latestImage!,
+                                fit: BoxFit.contain,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
                       // Zoom controls - only show if image is bigger than container
                       if (_shouldShowZoomControls) ...[
+                        const SizedBox(height: 8),
                         Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
@@ -426,48 +466,7 @@ class _MyHomePageState extends State<MyHomePage> {
                             ),
                           ],
                         ),
-                        const SizedBox(height: 8),
                       ],
-                      // Image preview with zoom and pan
-                      Container(
-                        constraints: BoxConstraints(
-                          minWidth: 300,
-                          minHeight: 200,
-                          maxWidth: max(
-                            300.0,
-                            MediaQuery.of(context).size.width - 32,
-                          ),
-                          maxHeight: max(200.0, 400),
-                        ),
-                        decoration: BoxDecoration(
-                          border: Border.all(color: Colors.grey),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(7),
-                          child: InteractiveViewer(
-                            transformationController:
-                                TransformationController(),
-                            boundaryMargin: const EdgeInsets.all(20),
-                            minScale: 0.5,
-                            maxScale: 5.0,
-                            clipBehavior: Clip.hardEdge,
-                            child: Transform.scale(
-                              scale: _zoomLevel,
-                              child: Image.memory(
-                                _latestImage!,
-                                fit: BoxFit.contain,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      ElevatedButton.icon(
-                        onPressed: _downloadImage,
-                        icon: const Icon(Icons.download),
-                        label: const Text('Download Image'),
-                      ),
                       const SizedBox(height: 20),
                     ],
                   ],
