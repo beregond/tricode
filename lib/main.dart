@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
@@ -71,6 +72,8 @@ class _MyHomePageState extends State<MyHomePage> {
   bool _isGenerating = false;
   String? _decodedText;
   bool _isDecoding = false;
+  Uint8List? _annotatedImage;
+  Map<String, dynamic>? _decodedResponse;
 
   bool get _shouldShowZoomControls {
     if (_imageWidth == null || _imageHeight == null) return false;
@@ -103,10 +106,30 @@ class _MyHomePageState extends State<MyHomePage> {
 
     _decodedTextSub = DecodedText.rustSignalStream.listen((signal) {
       if (!mounted) return;
-      setState(() {
-        _decodedText = signal.message.text;
-        _isDecoding = false;
-      });
+      try {
+        // Parse JSON response
+        final jsonResponse = jsonDecode(signal.message.text);
+
+        // Extract base64 image if present
+        Uint8List? imageBytes;
+        if (jsonResponse['annotated_image'] != null) {
+          imageBytes = base64Decode(jsonResponse['annotated_image'] as String);
+        }
+
+        setState(() {
+          _decodedResponse = jsonResponse;
+          _annotatedImage = imageBytes;
+          _decodedText = signal.message.text;
+          _isDecoding = false;
+        });
+      } catch (e) {
+        setState(() {
+          _decodedText = signal.message.text;
+          _annotatedImage = null;
+          _decodedResponse = null;
+          _isDecoding = false;
+        });
+      }
     });
   }
 
@@ -149,6 +172,8 @@ class _MyHomePageState extends State<MyHomePage> {
       setState(() {
         _isDecoding = true;
         _decodedText = null;
+        _annotatedImage = null;
+        _decodedResponse = null;
       });
 
       ImageBytes(bytes: bytes.toList()).sendSignalToRust();
@@ -162,6 +187,14 @@ class _MyHomePageState extends State<MyHomePage> {
         });
       }
     }
+  }
+
+  String _formatJsonResponse(Map<String, dynamic> response) {
+    // Create a formatted version without the annotated_image field for display
+    final displayResponse = Map<String, dynamic>.from(response);
+    displayResponse.remove('annotated_image');
+
+    return jsonEncode(displayResponse);
   }
 
   Future<void> _downloadImage() async {
@@ -284,9 +317,88 @@ class _MyHomePageState extends State<MyHomePage> {
                         ),
                         const SizedBox(height: 8),
                         const Text('Decoding image...'),
+                      ] else if (_decodedResponse != null &&
+                          _annotatedImage != null) ...[
+                        // Display image and response side by side
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            // Annotated image
+                            Expanded(
+                              child: Column(
+                                children: [
+                                  const Text(
+                                    'Annotated Image:',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Container(
+                                    constraints: const BoxConstraints(
+                                      maxWidth: 400,
+                                      maxHeight: 400,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      border: Border.all(color: Colors.grey),
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                    child: ClipRRect(
+                                      borderRadius: BorderRadius.circular(7),
+                                      child: Image.memory(
+                                        _annotatedImage!,
+                                        fit: BoxFit.contain,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 20),
+                            // Response JSON
+                            Expanded(
+                              child: Column(
+                                children: [
+                                  const Text(
+                                    'Analysis Result:',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Container(
+                                    constraints: const BoxConstraints(
+                                      maxHeight: 400,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      border: Border.all(color: Colors.grey),
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                    child: SingleChildScrollView(
+                                      child: Padding(
+                                        padding: const EdgeInsets.all(12.0),
+                                        child: SelectableText(
+                                          _formatJsonResponse(
+                                            _decodedResponse!,
+                                          ),
+                                          style: const TextStyle(
+                                            fontSize: 12,
+                                            fontFamily: 'monospace',
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
                       ] else if (_decodedText != null) ...[
                         const Text(
-                          'Decoded text:',
+                          'Decoded result:',
                           style: TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.bold,

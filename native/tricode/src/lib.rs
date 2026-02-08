@@ -1,12 +1,9 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-
 use image::codecs::png::PngEncoder;
-use image::{ExtendedColorType, ImageBuffer, ImageEncoder, Rgba};
-use rand::Rng;
-use rand_chacha::ChaCha8Rng;
-use rand::SeedableRng;
+use image::{ExtendedColorType, ImageBuffer, ImageEncoder, Rgba, GrayImage};
+use imageproc::edges::canny;
+use imageproc::contrast::{threshold, ThresholdType};
 use reed_solomon_erasure::galois_8::ReedSolomon;
+use serde::{Deserialize, Serialize};
 
 pub fn generate_code(message: &str) -> Vec<u8> {
     // Return the input string as raw bytes for now.
@@ -105,7 +102,7 @@ fn create_image_from_binary_data(encoded_data: &[u8], width_ratio: u32, height_r
             let h = pixels_per_bit_height as f64;
             let center_x = (w - 1.0) / 2.0;
             let denom = (h - 1.0).max(1.0);
-            let border_color = Rgba([border, border, border, 255]);
+            let _border_color = Rgba([border, border, border, 255]);
 
             if bit == 1 {
                 // Fill the equilateral triangle with border
@@ -404,12 +401,296 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<String, String> {
         return Err("Empty image data".to_string());
     }
     
-    // TODO: Implement actual decoding:
-    // 1. Decode PNG to get pixel data
-    // 2. Extract binary data from triangles
-    // 3. Apply Reed-Solomon decoding
-    // 4. Convert bytes back to UTF-8 string
+    // Load the image
+    let img = image::load_from_memory(png_bytes)
+        .map_err(|e| format!("Failed to load image: {}", e))?
+        .to_rgba8();
     
-    // For now, return dummy text
-    Ok(format!("Decoded dummy text from {} bytes of PNG data", png_bytes.len()))
+    // Convert to grayscale for processing
+    let gray_img = image::DynamicImage::ImageRgba8(img.clone()).to_luma8();
+    
+    // Find triangles in the image
+    let triangles = find_triangles(&gray_img)?;
+    
+    // Select 10 outermost triangles
+    let outermost = select_outermost_triangles(&triangles, 10);
+    
+    // Draw rectangles on the image
+    let mut annotated_img = img.clone();
+    draw_rectangles(&mut annotated_img, &outermost);
+    
+    // Encode annotated image to PNG
+    let mut png_bytes_vec = Vec::new();
+    let mut encoder = PngEncoder::new(&mut png_bytes_vec);
+    encoder.write_image(
+        annotated_img.as_raw(),
+        annotated_img.width(),
+        annotated_img.height(),
+        ExtendedColorType::Rgba8,
+    ).map_err(|e| format!("Failed to encode image: {}", e))?;
+    
+    // Encode to base64 for JSON transmission
+    let base64_image = base64_encode(&png_bytes_vec);
+    
+    // Create response structure
+    let response = DecodeResponse {
+        image_width: gray_img.width(),
+        image_height: gray_img.height(),
+        total_triangles: triangles.len(),
+        orientation_marks: outermost,
+        annotated_image: base64_image,
+    };
+    
+    // Return as JSON
+    serde_json::to_string_pretty(&response)
+        .map_err(|e| format!("Failed to serialize response: {}", e))
+}
+
+/// Represents a detected triangle region
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Triangle {
+    pub center_x: f32,
+    pub center_y: f32,
+    pub area: f32,
+    pub is_black: bool, // true if filled with black, false if white
+    pub min_x: u32,     // Bounding box - left edge
+    pub min_y: u32,     // Bounding box - top edge
+    pub max_x: u32,     // Bounding box - right edge
+    pub max_y: u32,     // Bounding box - bottom edge
+}
+
+/// Response structure for decode_image
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DecodeResponse {
+    pub image_width: u32,
+    pub image_height: u32,
+    pub total_triangles: usize,
+    pub orientation_marks: Vec<Triangle>,
+    pub annotated_image: String, // Base64 encoded PNG with red rectangles
+}
+
+/// Find triangles in a grayscale image
+fn find_triangles(img: &GrayImage) -> Result<Vec<Triangle>, String> {
+    let width = img.width();
+    let height = img.height();
+    
+    if width == 0 || height == 0 {
+        return Err("Invalid image dimensions".to_string());
+    }
+    
+    // Apply binary threshold to separate black and white regions
+    let binary = threshold(img, 128, ThresholdType::Binary);
+    
+    // Apply edge detection (for future use in more sophisticated detection)
+    let _edges = canny(&binary, 50.0, 100.0);
+    
+    let mut triangles = Vec::new();
+    
+    // Simple approach: scan the image in a grid pattern
+    // and look for triangle-like patterns
+    // We'll look for regions with triangular intensity patterns
+    
+    // Estimate triangle size based on image dimensions
+    // Assume we have at least 5x5 triangles in the smallest dimension
+    let min_dim = width.min(height);
+    let estimated_triangle_size = (min_dim / 10).max(20); // At least 20 pixels
+    
+    let step = estimated_triangle_size / 2; // Overlap regions
+    
+    for y in (0..height).step_by(step as usize) {
+        for x in (0..width).step_by(step as usize) {
+            // Check if this region looks like a triangle
+            if let Some(triangle) = analyze_region(
+                &binary,
+                x,
+                y,
+                estimated_triangle_size,
+                estimated_triangle_size,
+            ) {
+                triangles.push(triangle);
+            }
+        }
+    }
+    
+    Ok(triangles)
+}
+
+/// Select N triangles with the most extreme x/y positions (outer corners)
+/// Only considers black triangles
+fn select_outermost_triangles(triangles: &[Triangle], count: usize) -> Vec<Triangle> {
+    // Filter for only black triangles
+    let mut black_triangles: Vec<_> = triangles.iter().filter(|t| t.is_black).cloned().collect();
+    
+    if black_triangles.is_empty() {
+        return Vec::new();
+    }
+    
+    // Sort by distance from center, taking the most extreme (furthest from center)
+    if black_triangles.is_empty() {
+        return Vec::new();
+    }
+    
+    // Calculate image center
+    let avg_x = black_triangles.iter().map(|t| t.center_x).sum::<f32>() / black_triangles.len() as f32;
+    let avg_y = black_triangles.iter().map(|t| t.center_y).sum::<f32>() / black_triangles.len() as f32;
+    
+    // Sort by distance from center (descending)
+    black_triangles.sort_by(|a, b| {
+        let dist_a = (a.center_x - avg_x).powi(2) + (a.center_y - avg_y).powi(2);
+        let dist_b = (b.center_x - avg_x).powi(2) + (b.center_y - avg_y).powi(2);
+        dist_b.partial_cmp(&dist_a).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    
+    // Take the first `count` triangles
+    black_triangles.into_iter().take(count).collect()
+}
+
+/// Analyze a region to see if it contains a triangle pattern
+fn analyze_region(
+    img: &GrayImage,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Option<Triangle> {
+    let img_width = img.width();
+    let img_height = img.height();
+    
+    // Make sure region is within bounds
+    if x + width > img_width || y + height > img_height {
+        return None;
+    }
+    
+    // Sample pixels in the region
+    let mut black_pixels = 0;
+    let mut white_pixels = 0;
+    let mut total_pixels = 0;
+    
+    for dy in 0..height {
+        for dx in 0..width {
+            let px = x + dx;
+            let py = y + dy;
+            
+            if px < img_width && py < img_height {
+                let pixel = img.get_pixel(px, py)[0];
+                total_pixels += 1;
+                
+                if pixel < 128 {
+                    black_pixels += 1;
+                } else {
+                    white_pixels += 1;
+                }
+            }
+        }
+    }
+    
+    if total_pixels == 0 {
+        return None;
+    }
+    
+    // Check if region has significant color (not mostly gray/mixed)
+    let black_ratio = black_pixels as f32 / total_pixels as f32;
+    let white_ratio = white_pixels as f32 / total_pixels as f32;
+    
+    // A triangle should be mostly one color
+    // Account for borders and anti-aliasing
+    if black_ratio > 0.4 || white_ratio > 0.4 {
+        Some(Triangle {
+            center_x: x as f32 + width as f32 / 2.0,
+            center_y: y as f32 + height as f32 / 2.0,
+            area: (width * height) as f32,
+            is_black: black_ratio > white_ratio,
+            min_x: x,
+            min_y: y,
+            max_x: x + width,
+            max_y: y + height,
+        })
+    } else {
+        None
+    }
+}
+
+/// Draw red rectangles on the image based on triangle bounding boxes
+fn draw_rectangles(img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>, triangles: &[Triangle]) {
+    let red = Rgba([255, 0, 0, 255]);
+    let border_width = 2;
+    
+    for triangle in triangles {
+        // Draw rectangle borders
+        let min_x = triangle.min_x.max(0).min(img.width().saturating_sub(1));
+        let min_y = triangle.min_y.max(0).min(img.height().saturating_sub(1));
+        let max_x = triangle.max_x.min(img.width());
+        let max_y = triangle.max_y.min(img.height());
+        
+        // Top border
+        for x in min_x..max_x {
+            for dy in 0..border_width {
+                let y = (min_y + dy).min(img.height() - 1);
+                if x < img.width() && y < img.height() {
+                    img.put_pixel(x, y, red);
+                }
+            }
+        }
+        
+        // Bottom border
+        for x in min_x..max_x {
+            for dy in 0..border_width {
+                let y = (max_y.saturating_sub(1 + dy)).max(0);
+                if x < img.width() && y < img.height() {
+                    img.put_pixel(x, y, red);
+                }
+            }
+        }
+        
+        // Left border
+        for y in min_y..max_y {
+            for dx in 0..border_width {
+                let x = (min_x + dx).min(img.width() - 1);
+                if x < img.width() && y < img.height() {
+                    img.put_pixel(x, y, red);
+                }
+            }
+        }
+        
+        // Right border
+        for y in min_y..max_y {
+            for dx in 0..border_width {
+                let x = (max_x.saturating_sub(1 + dx)).max(0);
+                if x < img.width() && y < img.height() {
+                    img.put_pixel(x, y, red);
+                }
+            }
+        }
+    }
+}
+
+/// Encode bytes to base64
+fn base64_encode(data: &[u8]) -> String {
+    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::new();
+    
+    for chunk in data.chunks(3) {
+        let b1 = chunk[0];
+        let b2 = if chunk.len() > 1 { chunk[1] } else { 0 };
+        let b3 = if chunk.len() > 2 { chunk[2] } else { 0 };
+        
+        let n = ((b1 as u32) << 16) | ((b2 as u32) << 8) | (b3 as u32);
+        
+        result.push(CHARSET[((n >> 18) & 63) as usize] as char);
+        result.push(CHARSET[((n >> 12) & 63) as usize] as char);
+        
+        if chunk.len() > 1 {
+            result.push(CHARSET[((n >> 6) & 63) as usize] as char);
+        } else {
+            result.push('=');
+        }
+        
+        if chunk.len() > 2 {
+            result.push(CHARSET[(n & 63) as usize] as char);
+        } else {
+            result.push('=');
+        }
+    }
+    
+    result
 }
