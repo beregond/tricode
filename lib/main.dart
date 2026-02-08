@@ -78,6 +78,7 @@ class _MyHomePageState extends State<MyHomePage> {
   double _zoomLevel = 1.0;
   int? _imageWidth;
   int? _imageHeight;
+  bool _isGenerating = false;
 
   bool get _shouldShowZoomControls {
     if (_imageWidth == null || _imageHeight == null) return false;
@@ -104,6 +105,7 @@ class _MyHomePageState extends State<MyHomePage> {
         _imageWidth = image.width;
         _imageHeight = image.height;
         _zoomLevel = 1.0; // Reset zoom when new image is generated
+        _isGenerating = false; // Stop loading indicator
       });
     });
   }
@@ -116,6 +118,10 @@ class _MyHomePageState extends State<MyHomePage> {
     // Ensure positive non-zero values
     final safeWidth = widthRatio > 0 ? widthRatio : 21;
     final safeHeight = heightRatio > 0 ? heightRatio : 13;
+
+    setState(() {
+      _isGenerating = true; // Start loading indicator
+    });
 
     SmallText(
       text: text,
@@ -279,7 +285,16 @@ class _MyHomePageState extends State<MyHomePage> {
                       child: const Text('Generate'),
                     ),
                     const SizedBox(height: 20),
-                    if (_latestImage != null) ...[
+                    if (_isGenerating) ...[
+                      const SizedBox(
+                        width: 50,
+                        height: 50,
+                        child: CircularProgressIndicator(),
+                      ),
+                      const SizedBox(height: 8),
+                      const Text('Generating image...'),
+                      const SizedBox(height: 20),
+                    ] else if (_latestImage != null) ...[
                       const Text('Generated image:'),
                       const SizedBox(height: 8),
                       // Zoom controls - only show if image is bigger than container
@@ -345,12 +360,9 @@ class _MyHomePageState extends State<MyHomePage> {
                           maxScale: 5.0,
                           child: Transform.scale(
                             scale: _zoomLevel,
-                            child: ClipRRect(
-                              borderRadius: BorderRadius.circular(8),
-                              child: Image.memory(
-                                _latestImage!,
-                                fit: BoxFit.contain,
-                              ),
+                            child: Image.memory(
+                              _latestImage!,
+                              fit: BoxFit.contain,
                             ),
                           ),
                         ),
