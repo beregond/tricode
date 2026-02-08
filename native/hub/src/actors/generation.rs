@@ -34,6 +34,7 @@ impl Notifiable<SmallText> for GenerationActor {
         debug_print!("Received text: {}", msg.text);
         SmallNumber { number: 7 }.send_signal_to_dart();
         //return;
+        // TODO: I guess remove few lines below?
         let generated_bytes = tricode::generate_code(&msg.text);
         GeneratedBytes {
             bytes: generated_bytes,

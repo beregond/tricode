@@ -34,8 +34,8 @@ fn create_image_from_binary_data(encoded_data: &[u8], width_ratio: u32, height_r
     const PIXELS_PER_BIT_WIDTH: u32 = 51; // Bit box width in pixels
     let pixels_per_bit_height = ((PIXELS_PER_BIT_WIDTH as f64) * (3.0_f64.sqrt() / 2.0)).ceil() as u32;
 
-    // Calculate total bits needed
-    let total_bits = encoded_data.len() * 8;
+    // Calculate total bits needed, we add 8 bits for border marks
+    let total_bits = (encoded_data.len() + 1 ) * 8;
     
     // Calculate dimensions maintaining the aspect ratio and ensuring enough bit squares
     let gcd_val = gcd(width_ratio, height_ratio);
@@ -56,14 +56,33 @@ fn create_image_from_binary_data(encoded_data: &[u8], width_ratio: u32, height_r
     let mut bit_index = 0;
     for square_y in 0..height_squares {
         for square_x in 0..width_squares {
-            let bit = if bit_index < total_bits {
-                let byte_index = bit_index / 8;
-                let bit_offset = 7 - (bit_index % 8); // MSB first
-                let bit_value = (encoded_data[byte_index] >> bit_offset) & 1;
-                bit_index += 1;
-                bit_value
+            // Check if this is an orientation mark position
+            let is_first_row = square_y == 0;
+            let is_last_row = square_y == height_squares - 1;
+            let is_first_col = square_x == 0;
+            let is_second_col = square_x == 1;
+            let is_before_last_col = square_x == width_squares.saturating_sub(2);
+            let is_last_col = square_x == width_squares - 1;
+            
+            let bit = if (is_first_row || is_last_row) && 
+                         (is_first_col || is_last_col) {
+                // Orientation marks: 1st and last positions are always 1 (black)
+                1
+            } else if (is_first_row || is_last_row) && 
+                      (is_second_col || is_before_last_col) {
+                // Orientation marks: 2nd and before-last positions are always 0 (white)
+                0
             } else {
-                0 // Fill remaining squares with 0 (white)
+                // Normal data bit
+                let byte_index = bit_index / 8;
+                if byte_index < encoded_data.len() {
+                    let bit_offset = 7 - (bit_index % 8); // MSB first
+                    let bit_value = (encoded_data[byte_index] >> bit_offset) & 1;
+                    bit_index += 1;
+                    bit_value
+                } else {
+                    0 // Fill remaining squares with 0 (white)
+                }
             };
             
             // 0 = white, 1 = black
