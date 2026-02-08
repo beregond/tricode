@@ -415,6 +415,14 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<String, String> {
     // Select 4 corner triangles
     let outermost = select_outermost_triangles(&triangles, 4);
     
+    // Count rows by finding two corners with different orientations
+    let row_count = calculate_row_count(&outermost);
+    eprintln!("DEBUG: Detected {} rows", row_count);
+
+    // Count columns from corner spacing
+    let column_count = calculate_column_count(&triangles, &outermost);
+    eprintln!("DEBUG: Detected {} columns", column_count);
+    
     // Draw rectangles on the image
     let mut annotated_img = img.clone();
     draw_rectangles(&mut annotated_img, &outermost);
@@ -453,6 +461,7 @@ pub struct Triangle {
     pub center_y: f32,
     pub area: f32,
     pub is_black: bool, // true if filled with black, false if white
+    pub pointing_up: bool, // true if apex points up, false if points down
     pub min_x: u32,     // Bounding box - left edge
     pub min_y: u32,     // Bounding box - top edge
     pub max_x: u32,     // Bounding box - right edge
@@ -591,16 +600,128 @@ fn analyze_component(component: &[(u32, u32)], _origin_x: u32, _origin_y: u32) -
         return None;
     }
     
+    // Detect orientation: check pixel density in top vs bottom half
+    let mid_y = (min_y + max_y) / 2;
+    let mut top_pixels = 0;
+    let mut bottom_pixels = 0;
+    
+    for &(x, y) in component {
+        if y < mid_y {
+            top_pixels += 1;
+        } else {
+            bottom_pixels += 1;
+        }
+    }
+    
+    // If more pixels in top half, triangle points down (apex at bottom)
+    // If more pixels in bottom half, triangle points up (apex at top)
+    let pointing_up = bottom_pixels > top_pixels;
+    
     Some(Triangle {
         center_x,
         center_y,
         area,
         is_black: true,
+        pointing_up,
         min_x,
         min_y,
         max_x,
         max_y,
     })
+}
+
+/// Calculate the number of rows based on corner triangles with different orientations
+fn calculate_row_count(corners: &[Triangle]) -> usize {
+    if corners.len() < 2 {
+        return 0;
+    }
+    
+    // Find two triangles with different orientations
+    let mut up_triangle: Option<&Triangle> = None;
+    let mut down_triangle: Option<&Triangle> = None;
+    
+    for triangle in corners {
+        if triangle.pointing_up && up_triangle.is_none() {
+            up_triangle = Some(triangle);
+        } else if !triangle.pointing_up && down_triangle.is_none() {
+            down_triangle = Some(triangle);
+        }
+        
+        if up_triangle.is_some() && down_triangle.is_some() {
+            break;
+        }
+    }
+    
+    if let (Some(up), Some(down)) = (up_triangle, down_triangle) {
+        // Calculate vertical distance between the two triangles
+        let vertical_distance = (up.center_y - down.center_y).abs();
+        
+        // Calculate average triangle height from bounding boxes
+        let height1 = (up.max_y - up.min_y) as f32;
+        let height2 = (down.max_y - down.min_y) as f32;
+        let avg_height = (height1 + height2) / 2.0;
+        
+        if avg_height > 0.0 {
+            // Number of rows: the distance includes borders, so we need to adjust
+            // Round the division to get the number of intervals, then add 1 for the row count
+            let intervals = (vertical_distance / avg_height).round() as usize;
+            // But we're measuring center-to-center of filled triangles with borders,
+            // so subtract 1 to account for border overlap
+            return if intervals > 0 { intervals } else { 1 };
+        }
+    }
+    
+    0
+}
+
+/// Calculate the number of columns by clustering triangles into rows
+/// and taking the maximum count across rows.
+fn calculate_column_count(triangles: &[Triangle], corners: &[Triangle]) -> usize {
+    if triangles.is_empty() || corners.len() < 2 {
+        return 0;
+    }
+
+    // Estimate triangle width (median)
+    let mut widths: Vec<f32> = triangles
+        .iter()
+        .map(|t| (t.max_x - t.min_x) as f32)
+        .collect();
+    widths.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = widths.len() / 2;
+    let median_width = widths[mid].max(1.0);
+
+    // Pick two corner triangles from the same row (top row by default)
+    let mut corners_sorted: Vec<&Triangle> = corners.iter().collect();
+    corners_sorted.sort_by(|a, b| a.center_y.partial_cmp(&b.center_y).unwrap_or(std::cmp::Ordering::Equal));
+    let top_row_y = corners_sorted.first().map(|t| t.center_y).unwrap_or(0.0);
+    let row_threshold = median_width * 0.6;
+
+    let mut top_row: Vec<&Triangle> = corners_sorted
+        .into_iter()
+        .filter(|t| (t.center_y - top_row_y).abs() <= row_threshold)
+        .collect();
+
+    if top_row.len() < 2 {
+        // Fallback: use the two farthest corners by x
+        let mut by_x: Vec<&Triangle> = corners.iter().collect();
+        by_x.sort_by(|a, b| a.center_x.partial_cmp(&b.center_x).unwrap_or(std::cmp::Ordering::Equal));
+        top_row = by_x.into_iter().take(2).collect();
+    }
+
+    if top_row.len() < 2 {
+        return 0;
+    }
+
+    top_row.sort_by(|a, b| a.center_x.partial_cmp(&b.center_x).unwrap_or(std::cmp::Ordering::Equal));
+    let left = top_row.first().unwrap();
+    let right = top_row.last().unwrap();
+
+    // M is the number of triangle widths between corners
+    let distance = (right.center_x - left.center_x).abs();
+    let m = (distance / median_width).round() as usize;
+
+    // Columns = 2*M + 1
+    2 * m + 1
 }
 
 /// Select triangles from the 4 corners of the image
