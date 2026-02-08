@@ -353,16 +353,21 @@ class _MyHomePageState extends State<MyHomePage> {
                           border: Border.all(color: Colors.grey),
                           borderRadius: BorderRadius.circular(8),
                         ),
-                        child: InteractiveViewer(
-                          transformationController: TransformationController(),
-                          boundaryMargin: const EdgeInsets.all(20),
-                          minScale: 0.5,
-                          maxScale: 5.0,
-                          child: Transform.scale(
-                            scale: _zoomLevel,
-                            child: Image.memory(
-                              _latestImage!,
-                              fit: BoxFit.contain,
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(7),
+                          child: InteractiveViewer(
+                            transformationController:
+                                TransformationController(),
+                            boundaryMargin: const EdgeInsets.all(20),
+                            minScale: 0.5,
+                            maxScale: 5.0,
+                            clipBehavior: Clip.hardEdge,
+                            child: Transform.scale(
+                              scale: _zoomLevel,
+                              child: Image.memory(
+                                _latestImage!,
+                                fit: BoxFit.contain,
+                              ),
                             ),
                           ),
                         ),

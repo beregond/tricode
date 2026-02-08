@@ -46,11 +46,22 @@ fn create_image_from_binary_data(encoded_data: &[u8], width_ratio: u32, height_r
     let (mut width_squares, mut height_squares) =
         find_optimal_factors(total_bits as u32, normalized_width, normalized_height);
 
-    // Actual pixel dimensions
-    let width = ((width_squares + 1) / 2) * PIXELS_PER_BIT_WIDTH;
-    let height = height_squares * pixels_per_bit_height;
+    // Calculate padding
+    let padding_x = PIXELS_PER_BIT_WIDTH / 2;
+    let padding_y = pixels_per_bit_height / 2;
+    
+    // Actual pixel dimensions (including padding)
+    let width_without_padding = ((width_squares + 1) / 2) * PIXELS_PER_BIT_WIDTH;
+    let height_without_padding = height_squares * pixels_per_bit_height;
+    let width = width_without_padding + (padding_x * 2);
+    let height = height_without_padding + (padding_y * 2);
     
     let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::new(width, height);
+    
+    // Fill with white background
+    for pixel in img.pixels_mut() {
+        *pixel = Rgba([255, 255, 255, 255]);
+    }
 
     // Fill image with encoded data bits (each bit as a 4x4 square)
     let mut bit_index = 0;
@@ -89,11 +100,6 @@ fn create_image_from_binary_data(encoded_data: &[u8], width_ratio: u32, height_r
             let (color, border) = if bit == 0 { (255, 255) } else { (0, 255) };
             let rgba = Rgba([color, color, color, 255]);
             
-            // Fill the equilateral triangle with border
-            let mut pointing_down = square_x % 2 == 0;
-            if square_y % 2 == 1 {
-                pointing_down = !pointing_down;
-            }
 
             let w = PIXELS_PER_BIT_WIDTH as f64;
             let h = pixels_per_bit_height as f64;
@@ -101,33 +107,42 @@ fn create_image_from_binary_data(encoded_data: &[u8], width_ratio: u32, height_r
             let denom = (h - 1.0).max(1.0);
             let border_color = Rgba([border, border, border, 255]);
 
-            for dy in 0..pixels_per_bit_height {
-                for dx in 0..PIXELS_PER_BIT_WIDTH {
-                    let y = dy as f64;
-                    let x = dx as f64;
-                    let t = y / denom;
+            if bit == 1 {
+                // Fill the equilateral triangle with border
+                let mut pointing_down = square_x % 2 == 0;
+                if square_y % 2 == 1 {
+                    pointing_down = !pointing_down;
+                }
 
-                    let half_width = if pointing_down {
-                        (w / 2.0) * (1.0 - t)
-                    } else {
-                        (w / 2.0) * t
-                    };
+                for dy in 0..pixels_per_bit_height {
+                    for dx in 0..PIXELS_PER_BIT_WIDTH {
+                        let y = dy as f64;
+                        let x = dx as f64;
+                        let t = y / denom;
 
-                    if (x - center_x).abs() <= half_width {
-                        let base_x = square_x * (PIXELS_PER_BIT_WIDTH / 2);
-                        let px = base_x + dx;
-                        let py = square_y * pixels_per_bit_height + dy;
+                        let half_width = if pointing_down {
+                            (w / 2.0) * (1.0 - t)
+                        } else {
+                            (w / 2.0) * t
+                        };
 
-                        // Check if this pixel is on a border
-                        // TODO: maybe simpler?
-                        let is_base = if pointing_down { dy == 0 } else { dy == pixels_per_bit_height - 1 };
-                        let is_tip = if pointing_down { dy == pixels_per_bit_height - 1 } else { dy == 0 };
-                        let is_left_edge = (x - center_x).abs() >= half_width - 0.5;
-                        let is_right_edge = (x - center_x).abs() >= half_width - 1.5;
+                        if (x - center_x).abs() <= half_width {
+                            let base_x = square_x * (PIXELS_PER_BIT_WIDTH / 2);
+                            let px = padding_x + base_x + dx;
+                            let py = padding_y + square_y * pixels_per_bit_height + dy;
 
-                        let use_border = is_base || is_tip || is_left_edge || is_right_edge;
-                        let pixel_color = if use_border { border_color } else { rgba };
-                        img.put_pixel(px, py, pixel_color);
+                            // Check if this pixel is on a border
+                            // TODO: maybe simpler?
+                            let is_base = if pointing_down { dy == 0 } else { dy == pixels_per_bit_height - 1 };
+                            let is_tip = if pointing_down { dy == pixels_per_bit_height - 1 } else { dy == 0 };
+                            let is_left_edge = (x - center_x).abs() >= half_width - 0.5;
+                            let is_right_edge = (x - center_x).abs() >= half_width - 1.5;
+
+                            let is_border = is_base || is_tip || is_left_edge || is_right_edge;
+                            if ! is_border {
+                                img.put_pixel(px, py, rgba);
+                            }
+                        }
                     }
                 }
             }
