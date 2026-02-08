@@ -412,8 +412,8 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<String, String> {
     // Find triangles in the image
     let triangles = find_triangles(&gray_img)?;
     
-    // Select 10 outermost triangles
-    let outermost = select_outermost_triangles(&triangles, 10);
+    // Select 4 corner triangles
+    let outermost = select_outermost_triangles(&triangles, 4);
     
     // Draw rectangles on the image
     let mut annotated_img = img.clone();
@@ -469,7 +469,7 @@ pub struct DecodeResponse {
     pub annotated_image: String, // Base64 encoded PNG with red rectangles
 }
 
-/// Find triangles in a grayscale image
+/// Find triangles in a grayscale image using connected component analysis
 fn find_triangles(img: &GrayImage) -> Result<Vec<Triangle>, String> {
     let width = img.width();
     let height = img.height();
@@ -481,33 +481,19 @@ fn find_triangles(img: &GrayImage) -> Result<Vec<Triangle>, String> {
     // Apply binary threshold to separate black and white regions
     let binary = threshold(img, 128, ThresholdType::Binary);
     
-    // Apply edge detection (for future use in more sophisticated detection)
-    let _edges = canny(&binary, 50.0, 100.0);
-    
     let mut triangles = Vec::new();
+    let mut visited = vec![vec![false; width as usize]; height as usize];
     
-    // Simple approach: scan the image in a grid pattern
-    // and look for triangle-like patterns
-    // We'll look for regions with triangular intensity patterns
-    
-    // Estimate triangle size based on image dimensions
-    // Assume we have at least 5x5 triangles in the smallest dimension
-    let min_dim = width.min(height);
-    let estimated_triangle_size = (min_dim / 10).max(20); // At least 20 pixels
-    
-    let step = estimated_triangle_size / 2; // Overlap regions
-    
-    for y in (0..height).step_by(step as usize) {
-        for x in (0..width).step_by(step as usize) {
-            // Check if this region looks like a triangle
-            if let Some(triangle) = analyze_region(
-                &binary,
-                x,
-                y,
-                estimated_triangle_size,
-                estimated_triangle_size,
-            ) {
-                triangles.push(triangle);
+    // Find connected components (blobs) of black pixels
+    for y in 0..height {
+        for x in 0..width {
+            if !visited[y as usize][x as usize] && binary.get_pixel(x, y)[0] == 0 {
+                // Found a new black region, flood fill to find all connected pixels
+                let component = flood_fill(&binary, &mut visited, x, y);
+                
+                if let Some(triangle) = analyze_component(&component, x, y) {
+                    triangles.push(triangle);
+                }
             }
         }
     }
@@ -515,105 +501,163 @@ fn find_triangles(img: &GrayImage) -> Result<Vec<Triangle>, String> {
     Ok(triangles)
 }
 
-/// Select N triangles with the most extreme x/y positions (outer corners)
-/// Only considers black triangles
-fn select_outermost_triangles(triangles: &[Triangle], count: usize) -> Vec<Triangle> {
-    // Filter for only black triangles
-    let mut black_triangles: Vec<_> = triangles.iter().filter(|t| t.is_black).cloned().collect();
+/// Flood fill to find all connected black pixels in a region
+fn flood_fill(binary: &GrayImage, visited: &mut Vec<Vec<bool>>, start_x: u32, start_y: u32) -> Vec<(u32, u32)> {
+    let width = binary.width();
+    let height = binary.height();
+    let mut component = Vec::new();
+    let mut stack = vec![(start_x, start_y)];
     
-    if black_triangles.is_empty() {
-        return Vec::new();
+    while let Some((x, y)) = stack.pop() {
+        if x >= width || y >= height || visited[y as usize][x as usize] {
+            continue;
+        }
+        
+        if binary.get_pixel(x, y)[0] != 0 {
+            continue; // Not a black pixel
+        }
+        
+        visited[y as usize][x as usize] = true;
+        component.push((x, y));
+        
+        // Add neighbors to stack
+        if x > 0 {
+            stack.push((x - 1, y));
+        }
+        if x < width - 1 {
+            stack.push((x + 1, y));
+        }
+        if y > 0 {
+            stack.push((x, y - 1));
+        }
+        if y < height - 1 {
+            stack.push((x, y + 1));
+        }
     }
     
-    // Sort by distance from center, taking the most extreme (furthest from center)
-    if black_triangles.is_empty() {
-        return Vec::new();
-    }
-    
-    // Calculate image center
-    let avg_x = black_triangles.iter().map(|t| t.center_x).sum::<f32>() / black_triangles.len() as f32;
-    let avg_y = black_triangles.iter().map(|t| t.center_y).sum::<f32>() / black_triangles.len() as f32;
-    
-    // Sort by distance from center (descending)
-    black_triangles.sort_by(|a, b| {
-        let dist_a = (a.center_x - avg_x).powi(2) + (a.center_y - avg_y).powi(2);
-        let dist_b = (b.center_x - avg_x).powi(2) + (b.center_y - avg_y).powi(2);
-        dist_b.partial_cmp(&dist_a).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    
-    // Take the first `count` triangles
-    black_triangles.into_iter().take(count).collect()
+    component
 }
 
-/// Analyze a region to see if it contains a triangle pattern
-fn analyze_region(
-    img: &GrayImage,
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-) -> Option<Triangle> {
-    let img_width = img.width();
-    let img_height = img.height();
-    
-    // Make sure region is within bounds
-    if x + width > img_width || y + height > img_height {
+/// Analyze a connected component to determine if it's a valid triangle
+fn analyze_component(component: &[(u32, u32)], _origin_x: u32, _origin_y: u32) -> Option<Triangle> {
+    if component.is_empty() {
         return None;
     }
     
-    // Sample pixels in the region
-    let mut black_pixels = 0;
-    let mut white_pixels = 0;
-    let mut total_pixels = 0;
+    // Calculate bounding box and centroid
+    let mut min_x = u32::MAX;
+    let mut min_y = u32::MAX;
+    let mut max_x = 0;
+    let mut max_y = 0;
+    let mut sum_x = 0u64;
+    let mut sum_y = 0u64;
     
-    for dy in 0..height {
-        for dx in 0..width {
-            let px = x + dx;
-            let py = y + dy;
+    for &(x, y) in component {
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+        sum_x += x as u64;
+        sum_y += y as u64;
+    }
+    
+    let area = component.len() as f32;
+    let count = component.len() as f32;
+    let center_x = sum_x as f32 / count;
+    let center_y = sum_y as f32 / count;
+    
+    // Filter by area: triangles should have reasonable size
+    // Expected area based on bounding box dimensions
+    let bbox_area = ((max_x - min_x + 1) * (max_y - min_y + 1)) as f32;
+    let fill_ratio = area / bbox_area;
+    
+    // Triangles typically fill 40-70% of their bounding box
+    if fill_ratio < 0.3 || fill_ratio > 0.8 {
+        return None;
+    }
+    
+    // Filter by minimum area (avoid noise)
+    if area < 20.0 {
+        return None;
+    }
+    
+    // Filter by aspect ratio (triangles have reasonable width/height ratio)
+    let width = (max_x - min_x + 1) as f32;
+    let height = (max_y - min_y + 1) as f32;
+    let aspect_ratio = width / height.max(1.0);
+    
+    // Accept a reasonable range for aspect ratios
+    if aspect_ratio < 0.3 || aspect_ratio > 3.0 {
+        return None;
+    }
+    
+    Some(Triangle {
+        center_x,
+        center_y,
+        area,
+        is_black: true,
+        min_x,
+        min_y,
+        max_x,
+        max_y,
+    })
+}
+
+/// Select triangles from the 4 corners of the image
+/// Only considers black triangles closest to each image corner
+fn select_outermost_triangles(triangles: &[Triangle], count: usize) -> Vec<Triangle> {
+    // Filter for only black triangles
+    let black_triangles: Vec<_> = triangles.iter().filter(|t| t.is_black).cloned().collect();
+    
+    if black_triangles.is_empty() {
+        return Vec::new();
+    }
+    
+    // Get image dimensions from triangles
+    let max_x = black_triangles.iter().map(|t| t.max_x).max().unwrap_or(0);
+    let max_y = black_triangles.iter().map(|t| t.max_y).max().unwrap_or(0);
+    
+    // Define the 4 corners
+    let corners = [
+        (0.0, 0.0),           // Top-left
+        (max_x as f32, 0.0),  // Top-right
+        (0.0, max_y as f32),  // Bottom-left
+        (max_x as f32, max_y as f32), // Bottom-right
+    ];
+    
+    // For each corner, find the closest triangle
+    let mut selected: [Option<Triangle>; 4] = [None, None, None, None];
+    let mut min_distances: [f32; 4] = [f32::MAX; 4];
+    
+    for triangle in black_triangles {
+        let center_x = (triangle.min_x as f32 + triangle.max_x as f32) / 2.0;
+        let center_y = (triangle.min_y as f32 + triangle.max_y as f32) / 2.0;
+        
+        // Find distance to each corner
+        for (idx, &(corner_x, corner_y)) in corners.iter().enumerate() {
+            let dist = (center_x - corner_x).powi(2) + (center_y - corner_y).powi(2);
             
-            if px < img_width && py < img_height {
-                let pixel = img.get_pixel(px, py)[0];
-                total_pixels += 1;
-                
-                if pixel < 128 {
-                    black_pixels += 1;
-                } else {
-                    white_pixels += 1;
-                }
+            // Keep the closest triangle to each corner
+            if dist < min_distances[idx] {
+                min_distances[idx] = dist;
+                selected[idx] = Some(triangle.clone());
             }
         }
     }
     
-    if total_pixels == 0 {
-        return None;
-    }
-    
-    // Check if region has significant color (not mostly gray/mixed)
-    let black_ratio = black_pixels as f32 / total_pixels as f32;
-    let white_ratio = white_pixels as f32 / total_pixels as f32;
-    
-    // A triangle should be mostly one color
-    // Account for borders and anti-aliasing
-    if black_ratio > 0.4 || white_ratio > 0.4 {
-        Some(Triangle {
-            center_x: x as f32 + width as f32 / 2.0,
-            center_y: y as f32 + height as f32 / 2.0,
-            area: (width * height) as f32,
-            is_black: black_ratio > white_ratio,
-            min_x: x,
-            min_y: y,
-            max_x: x + width,
-            max_y: y + height,
-        })
-    } else {
-        None
-    }
+    // Return selected triangles
+    selected.iter()
+        .filter_map(|c| c.clone())
+        .take(count)
+        .collect()
 }
+
+
 
 /// Draw red rectangles on the image based on triangle bounding boxes
 fn draw_rectangles(img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>, triangles: &[Triangle]) {
     let red = Rgba([255, 0, 0, 255]);
-    let border_width = 2;
+    let border_width = 5;
     
     for triangle in triangles {
         // Draw rectangle borders
