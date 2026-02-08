@@ -3,8 +3,10 @@
 //! Focus on message passing instead.
 
 mod generation;
+mod decode;
 
 use generation::GenerationActor;
+use decode::DecodeActor;
 use messages::prelude::Context;
 use tokio::spawn;
 
@@ -24,7 +26,13 @@ pub async fn create_actors() {
     let generation_context = Context::new();
     let generation_addr = generation_context.address();
 
+    let decode_context = Context::new();
+    let decode_addr = decode_context.address();
+
     // Spawn the actors.
     let generation_actor = GenerationActor::new(generation_addr.clone());
     spawn(generation_context.run(generation_actor));
+
+    let decode_actor = DecodeActor::new(decode_addr.clone());
+    spawn(decode_context.run(decode_actor));
 }

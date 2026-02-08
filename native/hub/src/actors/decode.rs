@@ -1,0 +1,48 @@
+use crate::signals::{DecodedText, ImageBytes};
+use async_trait::async_trait;
+use messages::prelude::{Actor, Address, Context, Notifiable};
+use rinf::{DartSignal, RustSignal, debug_print};
+use tokio::task::JoinSet;
+
+/// The decode actor.
+pub struct DecodeActor {
+    /// Owned tasks that are canceled when the actor is dropped.
+    _owned_tasks: JoinSet<()>,
+}
+
+impl Actor for DecodeActor {}
+
+impl DecodeActor {
+    /// Creates the actor and initializes its fields.
+    pub fn new(self_addr: Address<Self>) -> Self {
+        let mut _owned_tasks = JoinSet::new();
+        _owned_tasks.spawn(Self::listen_to_dart(self_addr.clone()));
+        DecodeActor { _owned_tasks }
+    }
+}
+
+#[async_trait]
+impl Notifiable<ImageBytes> for DecodeActor {
+    async fn notify(&mut self, msg: ImageBytes, _: &Context<Self>) {
+        debug_print!("Received {} bytes to decode", msg.bytes.len());
+        
+        // TODO: Implement actual decoding logic
+        // For now, return dummy text
+        let decoded = format!("Dummy decoded text from {} bytes", msg.bytes.len());
+        
+        DecodedText {
+            text: decoded,
+        }
+        .send_signal_to_dart();
+    }
+}
+
+impl DecodeActor {
+    /// Listen to an external source, which in this case is Dart.
+    async fn listen_to_dart(mut self_addr: Address<Self>) {
+        let receiver = ImageBytes::get_dart_signal_receiver();
+        while let Some(signal_pack) = receiver.recv().await {
+            let _ = self_addr.notify(signal_pack.message).await;
+        }
+    }
+}

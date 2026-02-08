@@ -9,6 +9,18 @@ pub struct SmallText {
     pub height_ratio: u32,
 }
 
+/// Image bytes to be decoded.
+#[derive(Deserialize, DartSignal)]
+pub struct ImageBytes {
+    pub bytes: Vec<u8>,
+}
+
+/// Decoded text from image.
+#[derive(Serialize, RustSignal)]
+pub struct DecodedText {
+    pub text: String,
+}
+
 /// To send data from Rust to Dart, use `RustSignal`.
 #[derive(Serialize, RustSignal)]
 pub struct SmallNumber {

@@ -42,24 +42,13 @@ class MyApp extends StatelessWidget {
         // tested with just a hot reload.
         colorScheme: .fromSeed(seedColor: Colors.deepPurple),
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      home: const MyHomePage(),
     );
   }
 }
 
 class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+  const MyHomePage({super.key});
 
   @override
   State<MyHomePage> createState() => _MyHomePageState();
@@ -74,11 +63,14 @@ class _MyHomePageState extends State<MyHomePage> {
     text: '13',
   );
   StreamSubscription<RustSignalPack<GeneratedImage>>? _generatedImageSub;
+  StreamSubscription<RustSignalPack<DecodedText>>? _decodedTextSub;
   Uint8List? _latestImage;
   double _zoomLevel = 1.0;
   int? _imageWidth;
   int? _imageHeight;
   bool _isGenerating = false;
+  String? _decodedText;
+  bool _isDecoding = false;
 
   bool get _shouldShowZoomControls {
     if (_imageWidth == null || _imageHeight == null) return false;
@@ -108,6 +100,14 @@ class _MyHomePageState extends State<MyHomePage> {
         _isGenerating = false; // Stop loading indicator
       });
     });
+
+    _decodedTextSub = DecodedText.rustSignalStream.listen((signal) {
+      if (!mounted) return;
+      setState(() {
+        _decodedText = signal.message.text;
+        _isDecoding = false;
+      });
+    });
   }
 
   void _sendTextToRust() {
@@ -128,6 +128,40 @@ class _MyHomePageState extends State<MyHomePage> {
       widthRatio: safeWidth,
       heightRatio: safeHeight,
     ).sendSignalToRust();
+  }
+
+  Future<void> _pickAndDecodeImage() async {
+    try {
+      const XTypeGroup typeGroup = XTypeGroup(
+        label: 'images',
+        extensions: ['png', 'jpg', 'jpeg'],
+      );
+
+      final XFile? file = await openFile(acceptedTypeGroups: [typeGroup]);
+
+      if (file == null) {
+        // User canceled the dialog
+        return;
+      }
+
+      final bytes = await file.readAsBytes();
+
+      setState(() {
+        _isDecoding = true;
+        _decodedText = null;
+      });
+
+      ImageBytes(bytes: bytes.toList()).sendSignalToRust();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error reading file: $e')));
+        setState(() {
+          _isDecoding = false;
+        });
+      }
+    }
   }
 
   Future<void> _downloadImage() async {
@@ -211,16 +245,72 @@ class _MyHomePageState extends State<MyHomePage> {
       child: Scaffold(
         appBar: AppBar(
           backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-          title: Text(widget.title),
+          title: const Text('Tricode'),
           bottom: const TabBar(
             tabs: [
-              Tab(text: 'Generate'),
               Tab(text: 'Read'),
+              Tab(text: 'Generate'),
             ],
           ),
         ),
         body: TabBarView(
           children: [
+            Center(
+              child: SingleChildScrollView(
+                child: Padding(
+                  padding: const EdgeInsets.all(24.0),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Text(
+                        'Select an image to decode',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      ElevatedButton.icon(
+                        onPressed: _pickAndDecodeImage,
+                        icon: const Icon(Icons.file_upload),
+                        label: const Text('Select Image File'),
+                      ),
+                      const SizedBox(height: 20),
+                      if (_isDecoding) ...[
+                        const SizedBox(
+                          width: 50,
+                          height: 50,
+                          child: CircularProgressIndicator(),
+                        ),
+                        const SizedBox(height: 8),
+                        const Text('Decoding image...'),
+                      ] else if (_decodedText != null) ...[
+                        const Text(
+                          'Decoded text:',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(16.0),
+                          decoration: BoxDecoration(
+                            border: Border.all(color: Colors.grey),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: SelectableText(
+                            _decodedText!,
+                            style: const TextStyle(fontSize: 14),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
             Center(
               child: SingleChildScrollView(
                 child: Column(
@@ -384,15 +474,6 @@ class _MyHomePageState extends State<MyHomePage> {
                 ),
               ),
             ),
-            const Center(
-              child: Padding(
-                padding: EdgeInsets.all(24.0),
-                child: Text(
-                  'Lorem ipsum dolor sit amet',
-                  textAlign: TextAlign.center,
-                ),
-              ),
-            ),
           ],
         ),
       ),
@@ -402,6 +483,7 @@ class _MyHomePageState extends State<MyHomePage> {
   @override
   void dispose() {
     _generatedImageSub?.cancel();
+    _decodedTextSub?.cancel();
     _textController.dispose();
     _widthRatioController.dispose();
     _heightRatioController.dispose();
