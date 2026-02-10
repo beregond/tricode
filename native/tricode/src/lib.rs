@@ -1,9 +1,9 @@
 use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, ImageBuffer, ImageEncoder, Rgba, GrayImage};
-use imageproc::edges::canny;
 use imageproc::contrast::{threshold, ThresholdType};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 pub fn generate_code(message: &str) -> Vec<u8> {
     // Return the input string as raw bytes for now.
@@ -490,17 +490,23 @@ fn find_triangles(img: &GrayImage) -> Result<Vec<Triangle>, String> {
     // Apply binary threshold to separate black and white regions
     let binary = threshold(img, 128, ThresholdType::Binary);
     
+    // Erode the binary image to separate touching triangles
+    let eroded = erode_binary(&binary, 2);
+    
+    // Find connected components in the eroded image
     let mut triangles = Vec::new();
     let mut visited = vec![vec![false; width as usize]; height as usize];
     
-    // Find connected components (blobs) of black pixels
     for y in 0..height {
         for x in 0..width {
-            if !visited[y as usize][x as usize] && binary.get_pixel(x, y)[0] == 0 {
-                // Found a new black region, flood fill to find all connected pixels
-                let component = flood_fill(&binary, &mut visited, x, y);
+            if !visited[y as usize][x as usize] && eroded.get_pixel(x, y)[0] == 0 {
+                // Found a new black region in eroded image
+                let eroded_component = flood_fill(&eroded, &mut visited, x, y);
                 
-                if let Some(triangle) = analyze_component(&component, x, y) {
+                // Dilate the component back to approximate original size
+                let dilated_component = dilate_component(&eroded_component, &binary, 2);
+                
+                if let Some(triangle) = analyze_component(&dilated_component, x, y) {
                     triangles.push(triangle);
                 }
             }
@@ -510,7 +516,82 @@ fn find_triangles(img: &GrayImage) -> Result<Vec<Triangle>, String> {
     Ok(triangles)
 }
 
-/// Flood fill to find all connected black pixels in a region
+/// Erode black regions in a binary image by removing boundary pixels
+/// Erosion reduces black regions, helping to separate touching regions
+fn erode_binary(binary: &GrayImage, radius: u32) -> GrayImage {
+    let width = binary.width();
+    let height = binary.height();
+    let mut result = binary.clone();
+    
+    for _ in 0..radius {
+        let mut eroded = result.clone();
+        
+        for y in 0..height {
+            for x in 0..width {
+                if result.get_pixel(x, y)[0] == 0 {
+                    // This is a black pixel; check if all neighbors are also black
+                    let mut is_eroded = false;
+                    
+                    for dx in -1..=1i32 {
+                        for dy in -1..=1i32 {
+                            let nx = (x as i32 + dx) as u32;
+                            let ny = (y as i32 + dy) as u32;
+                            
+                            if nx >= width || ny >= height || result.get_pixel(nx, ny)[0] != 0 {
+                                is_eroded = true;
+                                break;
+                            }
+                        }
+                        if is_eroded {
+                            break;
+                        }
+                    }
+                    
+                    if is_eroded {
+                        eroded.put_pixel(x, y, image::Luma([255])); // Make white
+                    }
+                }
+            }
+        }
+        result = eroded;
+    }
+    
+    result
+}
+
+/// Dilate a component back to approximate its original size
+/// Only expands into pixels that are black in the original binary image
+fn dilate_component(component: &[(u32, u32)], binary: &GrayImage, radius: u32) -> Vec<(u32, u32)> {
+    let width = binary.width();
+    let height = binary.height();
+    let mut expanded: std::collections::HashSet<(u32, u32)> = component.iter().copied().collect();
+    
+    for _ in 0..radius {
+        let mut new_expanded = expanded.clone();
+        
+        for &(x, y) in &expanded {
+            // Check all neighbors within a 3x3 region
+            for dx in -1..=1i32 {
+                for dy in -1..=1i32 {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    
+                    let nx = (x as i32 + dx) as u32;
+                    let ny = (y as i32 + dy) as u32;
+                    
+                    // Only expand into pixels that are black in the original
+                    if nx < width && ny < height && binary.get_pixel(nx, ny)[0] == 0 {
+                        new_expanded.insert((nx, ny));
+                    }
+                }
+            }
+        }
+        expanded = new_expanded;
+    }
+    
+    expanded.into_iter().collect()
+}
 fn flood_fill(binary: &GrayImage, visited: &mut Vec<Vec<bool>>, start_x: u32, start_y: u32) -> Vec<(u32, u32)> {
     let width = binary.width();
     let height = binary.height();
