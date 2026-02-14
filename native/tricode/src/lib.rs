@@ -735,7 +735,8 @@ fn calculate_row_count(corners: &[Triangle]) -> usize {
     
     if let (Some(up), Some(down)) = (up_triangle, down_triangle) {
         // Calculate vertical distance between the two triangles
-        let vertical_distance = (up.center_y - down.center_y).abs();
+        let vertical_distance = ((up.min_y - down.max_y) as f32).abs();
+
         
         // Calculate average triangle height from bounding boxes
         let height1 = (up.max_y - up.min_y) as f32;
