@@ -802,8 +802,7 @@ fn calculate_column_count(triangles: &[Triangle], corners: &[Triangle]) -> usize
     let distance = (right.center_x - left.center_x).abs();
     let m = (distance / median_width).round() as usize;
 
-    // Columns = 2*M + 1
-    2 * m + 1
+    2 * (m - 2) + 1
 }
 
 /// Select triangles from the 4 corners of the image
