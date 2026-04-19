@@ -438,46 +438,11 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<String, String> {
     let (bits, bit_count) = read_bits_from_grid(&gray_img, row_count, column_count, &outermost);
     eprintln!("DEBUG: Read {} data bits ({} bytes)", bit_count, bits.len());
 
-    // Attempt Reed-Solomon decode and log the recovered text
-    match reed_solomon_decode(bits.to_vec()) {
-        Ok(decoded_bytes) => match String::from_utf8(decoded_bytes) {
-            Ok(text) => eprintln!("DECODED TEXT: {}", text),
-            Err(e) => eprintln!("DECODED (non-UTF8) bytes: {:?}", e.into_bytes()),
-        },
-        Err(e) => eprintln!("Reed-Solomon decode failed: {}", e),
-    }
+    // Decode with Reed-Solomon and return the recovered text
+    let decoded_bytes = reed_solomon_decode(bits.to_vec())
+        .map_err(|e| format!("Reed-Solomon decode failed: {}", e))?;
 
-    draw_rectangles(&mut annotated_img, &outermost);
-
-    // Encode annotated image to PNG
-    let mut png_bytes_vec = Vec::new();
-    let encoder = PngEncoder::new(&mut png_bytes_vec);
-    encoder
-        .write_image(
-            annotated_img.as_raw(),
-            annotated_img.width(),
-            annotated_img.height(),
-            ExtendedColorType::Rgba8,
-        )
-        .map_err(|e| format!("Failed to encode image: {}", e))?;
-
-    // Encode to base64 for JSON transmission
-    let base64_image = base64_encode(&png_bytes_vec);
-
-    // Create response structure
-    let response = DecodeResponse {
-        image_width: gray_img.width(),
-        image_height: gray_img.height(),
-        total_triangles: triangles.len(),
-        orientation_marks: outermost,
-        annotated_image: base64_image,
-        bits,
-        bit_count,
-    };
-
-    // Return as JSON
-    serde_json::to_string_pretty(&response)
-        .map_err(|e| format!("Failed to serialize response: {}", e))
+    String::from_utf8(decoded_bytes).map_err(|e| format!("Decoded data is not valid UTF-8: {}", e))
 }
 
 /// Represents a detected triangle region

@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
@@ -64,16 +63,16 @@ class _MyHomePageState extends State<MyHomePage> {
     text: '13',
   );
   StreamSubscription<RustSignalPack<GeneratedImage>>? _generatedImageSub;
-  StreamSubscription<RustSignalPack<DecodedText>>? _decodedTextSub;
+  StreamSubscription<RustSignalPack<DecodeResult>>? _decodeResultSub;
   Uint8List? _latestImage;
   double _zoomLevel = 1.0;
   int? _imageWidth;
   int? _imageHeight;
   bool _isGenerating = false;
-  String? _decodedText;
   bool _isDecoding = false;
-  Uint8List? _annotatedImage;
-  Map<String, dynamic>? _decodedResponse;
+  bool? _decodeSuccess;
+  String? _decodeText;
+  String? _decodeError;
 
   bool get _shouldShowZoomControls {
     if (_imageWidth == null || _imageHeight == null) return false;
@@ -104,32 +103,15 @@ class _MyHomePageState extends State<MyHomePage> {
       });
     });
 
-    _decodedTextSub = DecodedText.rustSignalStream.listen((signal) {
+    _decodeResultSub = DecodeResult.rustSignalStream.listen((signal) {
       if (!mounted) return;
-      try {
-        // Parse JSON response
-        final jsonResponse = jsonDecode(signal.message.text);
-
-        // Extract base64 image if present
-        Uint8List? imageBytes;
-        if (jsonResponse['annotated_image'] != null) {
-          imageBytes = base64Decode(jsonResponse['annotated_image'] as String);
-        }
-
-        setState(() {
-          _decodedResponse = jsonResponse;
-          _annotatedImage = imageBytes;
-          _decodedText = signal.message.text;
-          _isDecoding = false;
-        });
-      } catch (e) {
-        setState(() {
-          _decodedText = signal.message.text;
-          _annotatedImage = null;
-          _decodedResponse = null;
-          _isDecoding = false;
-        });
-      }
+      final msg = signal.message;
+      setState(() {
+        _isDecoding = false;
+        _decodeSuccess = msg.success;
+        _decodeText = msg.success ? msg.text : null;
+        _decodeError = msg.success ? null : msg.error;
+      });
     });
   }
 
@@ -171,9 +153,9 @@ class _MyHomePageState extends State<MyHomePage> {
 
       setState(() {
         _isDecoding = true;
-        _decodedText = null;
-        _annotatedImage = null;
-        _decodedResponse = null;
+        _decodeSuccess = null;
+        _decodeText = null;
+        _decodeError = null;
       });
 
       ImageBytes(bytes: bytes.toList()).sendSignalToRust();
@@ -187,14 +169,6 @@ class _MyHomePageState extends State<MyHomePage> {
         });
       }
     }
-  }
-
-  String _formatJsonResponse(Map<String, dynamic> response) {
-    // Create a formatted version without the annotated_image field for display
-    final displayResponse = Map<String, dynamic>.from(response);
-    displayResponse.remove('annotated_image');
-
-    return jsonEncode(displayResponse);
   }
 
   Future<void> _downloadImage() async {
@@ -317,91 +291,13 @@ class _MyHomePageState extends State<MyHomePage> {
                         ),
                         const SizedBox(height: 8),
                         const Text('Decoding image...'),
-                      ] else if (_decodedResponse != null &&
-                          _annotatedImage != null) ...[
-                        // Display image and response side by side
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            // Annotated image
-                            Expanded(
-                              child: Column(
-                                children: [
-                                  const Text(
-                                    'Annotated Image:',
-                                    style: TextStyle(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 8),
-                                  Container(
-                                    constraints: const BoxConstraints(
-                                      maxWidth: 400,
-                                      maxHeight: 400,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      border: Border.all(color: Colors.grey),
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    child: ClipRRect(
-                                      borderRadius: BorderRadius.circular(7),
-                                      child: Image.memory(
-                                        _annotatedImage!,
-                                        fit: BoxFit.contain,
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(width: 20),
-                            // Response JSON
-                            Expanded(
-                              child: Column(
-                                children: [
-                                  const Text(
-                                    'Analysis Result:',
-                                    style: TextStyle(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 8),
-                                  Container(
-                                    constraints: const BoxConstraints(
-                                      maxHeight: 400,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      border: Border.all(color: Colors.grey),
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    child: SingleChildScrollView(
-                                      child: Padding(
-                                        padding: const EdgeInsets.all(12.0),
-                                        child: SelectableText(
-                                          _formatJsonResponse(
-                                            _decodedResponse!,
-                                          ),
-                                          style: const TextStyle(
-                                            fontSize: 12,
-                                            fontFamily: 'monospace',
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                      ] else if (_decodedText != null) ...[
+                      ] else if (_decodeSuccess == true) ...[
                         const Text(
-                          'Decoded result:',
+                          'Decoded successfully:',
                           style: TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.bold,
+                            color: Colors.green,
                           ),
                         ),
                         const SizedBox(height: 8),
@@ -409,12 +305,37 @@ class _MyHomePageState extends State<MyHomePage> {
                           width: double.infinity,
                           padding: const EdgeInsets.all(16.0),
                           decoration: BoxDecoration(
-                            border: Border.all(color: Colors.grey),
+                            border: Border.all(color: Colors.green),
                             borderRadius: BorderRadius.circular(8),
                           ),
                           child: SelectableText(
-                            _decodedText!,
+                            _decodeText!,
                             style: const TextStyle(fontSize: 14),
+                          ),
+                        ),
+                      ] else if (_decodeSuccess == false) ...[
+                        const Text(
+                          'Decoding failed:',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.red,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(16.0),
+                          decoration: BoxDecoration(
+                            border: Border.all(color: Colors.red),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: SelectableText(
+                            _decodeError!,
+                            style: const TextStyle(
+                              fontSize: 14,
+                              color: Colors.red,
+                            ),
                           ),
                         ),
                       ],
@@ -594,7 +515,7 @@ class _MyHomePageState extends State<MyHomePage> {
   @override
   void dispose() {
     _generatedImageSub?.cancel();
-    _decodedTextSub?.cancel();
+    _decodeResultSub?.cancel();
     _textController.dispose();
     _widthRatioController.dispose();
     _heightRatioController.dispose();

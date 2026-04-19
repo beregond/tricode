@@ -15,10 +15,12 @@ pub struct ImageBytes {
     pub bytes: Vec<u8>,
 }
 
-/// Decoded text from image.
+/// Result of decoding an image — either the recovered text or a failure reason.
 #[derive(Serialize, RustSignal)]
-pub struct DecodedText {
+pub struct DecodeResult {
+    pub success: bool,
     pub text: String,
+    pub error: String,
 }
 
 /// To send data from Rust to Dart, use `RustSignal`.

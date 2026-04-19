@@ -1,4 +1,4 @@
-use crate::signals::{DecodedText, ImageBytes};
+use crate::signals::{DecodeResult, ImageBytes};
 use async_trait::async_trait;
 use messages::prelude::{Actor, Address, Context, Notifiable};
 use rinf::{DartSignal, RustSignal, debug_print};
@@ -27,18 +27,15 @@ impl Notifiable<ImageBytes> for DecodeActor {
         debug_print!("Received {} bytes to decode", msg.bytes.len());
         
         // Decode the image using the tricode crate
-        let decoded = match tricode::decode_image(&msg.bytes) {
-            Ok(text) => text,
+        let signal = match tricode::decode_image(&msg.bytes) {
+            Ok(text) => DecodeResult { success: true, text, error: String::new() },
             Err(e) => {
                 debug_print!("Error decoding image: {}", e);
-                format!("Error decoding image: {}", e)
+                DecodeResult { success: false, text: String::new(), error: e }
             }
         };
         
-        DecodedText {
-            text: decoded,
-        }
-        .send_signal_to_dart();
+        signal.send_signal_to_dart();
     }
 }
 
