@@ -54,7 +54,9 @@ class MyHomePage extends StatefulWidget {
   State<MyHomePage> createState() => _MyHomePageState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
+class _MyHomePageState extends State<MyHomePage>
+    with SingleTickerProviderStateMixin {
+  late final TabController _tabController;
   final TextEditingController _textController = TextEditingController();
   final TextEditingController _widthRatioController = TextEditingController(
     text: '21',
@@ -84,6 +86,59 @@ class _MyHomePageState extends State<MyHomePage> {
   @override
   void initState() {
     super.initState();
+
+    _tabController = TabController(length: 2, vsync: this);
+    _tabController.addListener(() {
+      if (!_tabController.indexIsChanging) return;
+      // When leaving the Read tab (index 0), reset its state
+      if (_tabController.previousIndex == 0) {
+        setState(() {
+          _decodeSuccess = null;
+          _decodeText = null;
+          _decodeError = null;
+          _isDecoding = false;
+        });
+      }
+      // When leaving the Generate tab (index 1), reset its state
+      if (_tabController.previousIndex == 1) {
+        _textController.clear();
+        _widthRatioController.text = '21';
+        _heightRatioController.text = '13';
+        setState(() {
+          _latestImage = null;
+          _imageWidth = null;
+          _imageHeight = null;
+          _isGenerating = false;
+        });
+      }
+    });
+
+    // Hide the preview only when the actual text content changes (not just focus/cursor)
+    String lastText = _textController.text;
+    String lastWidth = _widthRatioController.text;
+    String lastHeight = _heightRatioController.text;
+
+    void clearPreviewIfChanged() {
+      final textChanged = _textController.text != lastText;
+      final widthChanged = _widthRatioController.text != lastWidth;
+      final heightChanged = _heightRatioController.text != lastHeight;
+      lastText = _textController.text;
+      lastWidth = _widthRatioController.text;
+      lastHeight = _heightRatioController.text;
+      if ((textChanged || widthChanged || heightChanged) &&
+          _latestImage != null) {
+        setState(() {
+          _latestImage = null;
+          _imageWidth = null;
+          _imageHeight = null;
+        });
+      }
+    }
+
+    _textController.addListener(clearPreviewIfChanged);
+    _widthRatioController.addListener(clearPreviewIfChanged);
+    _heightRatioController.addListener(clearPreviewIfChanged);
+
     _generatedImageSub = GeneratedImage.rustSignalStream.listen((signal) async {
       if (!mounted) return;
       final imageBytes = Uint8List.fromList(signal.message.pngBytes);
@@ -253,14 +308,16 @@ class _MyHomePageState extends State<MyHomePage> {
         appBar: AppBar(
           backgroundColor: Theme.of(context).colorScheme.inversePrimary,
           title: const Text('Tricode'),
-          bottom: const TabBar(
-            tabs: [
+          bottom: TabBar(
+            controller: _tabController,
+            tabs: const [
               Tab(text: 'Read'),
               Tab(text: 'Generate'),
             ],
           ),
         ),
         body: TabBarView(
+          controller: _tabController,
           children: [
             Center(
               child: SingleChildScrollView(
@@ -514,6 +571,7 @@ class _MyHomePageState extends State<MyHomePage> {
 
   @override
   void dispose() {
+    _tabController.dispose();
     _generatedImageSub?.cancel();
     _decodeResultSub?.cancel();
     _textController.dispose();
