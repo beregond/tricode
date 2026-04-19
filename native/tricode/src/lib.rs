@@ -357,15 +357,19 @@ pub fn reed_solomon_decode(encoded_data: Vec<u8>) -> Result<Vec<u8>, String> {
     let parity_shard_count = 10;
     let total_shards = data_shard_count + parity_shard_count;
 
-    // Validate encoded data length
+    // Trim to expected length (caller may pass more data than needed)
     let expected_len = 8 + (total_shards * shard_size);
-    if encoded_data.len() != expected_len {
+    let encoded_data = if encoded_data.len() > expected_len {
+        encoded_data[..expected_len].to_vec()
+    } else if encoded_data.len() != expected_len {
         return Err(format!(
             "Invalid encoded data length: expected {}, got {}",
             expected_len,
             encoded_data.len()
         ));
-    }
+    } else {
+        encoded_data
+    };
 
     // Create Reed-Solomon decoder
     let rs = ReedSolomon::new(data_shard_count, parity_shard_count)
@@ -430,6 +434,21 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<String, String> {
     let mut annotated_img = img.clone();
     draw_rectangles(&mut annotated_img, &outermost);
 
+    // Read data bits by sampling each triangle cell center
+    let (bits, bit_count) = read_bits_from_grid(&gray_img, row_count, column_count, &outermost);
+    eprintln!("DEBUG: Read {} data bits ({} bytes)", bit_count, bits.len());
+
+    // Attempt Reed-Solomon decode and log the recovered text
+    match reed_solomon_decode(bits.to_vec()) {
+        Ok(decoded_bytes) => match String::from_utf8(decoded_bytes) {
+            Ok(text) => eprintln!("DECODED TEXT: {}", text),
+            Err(e) => eprintln!("DECODED (non-UTF8) bytes: {:?}", e.into_bytes()),
+        },
+        Err(e) => eprintln!("Reed-Solomon decode failed: {}", e),
+    }
+
+    draw_rectangles(&mut annotated_img, &outermost);
+
     // Encode annotated image to PNG
     let mut png_bytes_vec = Vec::new();
     let encoder = PngEncoder::new(&mut png_bytes_vec);
@@ -452,6 +471,8 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<String, String> {
         total_triangles: triangles.len(),
         orientation_marks: outermost,
         annotated_image: base64_image,
+        bits,
+        bit_count,
     };
 
     // Return as JSON
@@ -481,6 +502,8 @@ pub struct DecodeResponse {
     pub total_triangles: usize,
     pub orientation_marks: Vec<Triangle>,
     pub annotated_image: String, // Base64 encoded PNG with red rectangles
+    pub bits: Vec<u8>,           // Packed bytes of decoded bits (MSB first)
+    pub bit_count: usize,        // Number of data bits decoded
 }
 
 /// Find triangles in a grayscale image using connected component analysis
@@ -874,6 +897,143 @@ fn select_outermost_triangles(triangles: &[Triangle], count: usize) -> Vec<Trian
         .filter_map(|c| c.clone())
         .take(count)
         .collect()
+}
+
+/// Sample a small rectangular region around (cx, cy) in a grayscale image.
+/// Returns true if more than half the sampled pixels are dark (< 128).
+fn sample_region_is_dark(img: &GrayImage, cx: f32, cy: f32, radius: u32) -> bool {
+    let r = radius as i32;
+    let x0 = (cx as i32 - r).max(0) as u32;
+    let y0 = (cy as i32 - r).max(0) as u32;
+    let x1 = ((cx as i32 + r) as u32).min(img.width().saturating_sub(1));
+    let y1 = ((cy as i32 + r) as u32).min(img.height().saturating_sub(1));
+
+    let mut dark = 0u32;
+    let mut total = 0u32;
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            if img.get_pixel(x, y)[0] < 128 {
+                dark += 1;
+            }
+            total += 1;
+        }
+    }
+    total > 0 && dark * 2 > total
+}
+
+/// Convert a detected triangle's pixel centroid to the bounding-box center of its grid cell.
+/// Due to triangle geometry, the pixel centroid is offset from the bbox center by ±h/6:
+///   pointing-down: centroid at h/3 from top  → bbox_center_y = centroid_y + h/6
+///   pointing-up:   centroid at 2h/3 from top → bbox_center_y = centroid_y - h/6
+/// The x-coordinate is symmetric, so centroid_x == bbox_center_x.
+fn centroid_to_bbox_center(triangle: &Triangle) -> (f32, f32) {
+    let h = (triangle.max_y - triangle.min_y + 1) as f32;
+    let correction = h / 6.0;
+    let bbox_cy = if triangle.pointing_up {
+        triangle.center_y - correction
+    } else {
+        triangle.center_y + correction
+    };
+    (triangle.center_x, bbox_cy)
+}
+
+/// Read bits from the image by sampling the pixel color at the center of each
+/// grid cell.  The orientation-mark cells (first/last row, first 2 and last 2
+/// columns) are skipped — they are not data bits.  Returns the data bits packed
+/// into bytes (MSB first).
+fn read_bits_from_grid(
+    img: &GrayImage,
+    row_count: usize,
+    column_count: usize,
+    corners: &[Triangle],
+) -> (Vec<u8>, usize) {
+    if row_count < 2 || column_count < 2 || corners.len() < 4 {
+        return (Vec::new(), 0);
+    }
+
+    // Identify the four corner triangles by their relative position in the image.
+    // top-left  → minimum (center_x + center_y)
+    // top-right → maximum (center_x − center_y)
+    // bottom-left  → minimum (center_x − center_y)
+    // bottom-right → maximum (center_x + center_y)
+    let find = |f: fn(f32, f32) -> f32| -> Option<&Triangle> {
+        corners.iter().max_by(|a, b| {
+            f(a.center_x, a.center_y)
+                .partial_cmp(&f(b.center_x, b.center_y))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    };
+
+    let top_left = corners.iter().min_by(|a, b| {
+        (a.center_x + a.center_y)
+            .partial_cmp(&(b.center_x + b.center_y))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let top_right = find(|x, y| x - y);
+    let bottom_left = corners.iter().min_by(|a, b| {
+        (a.center_x - a.center_y)
+            .partial_cmp(&(b.center_x - b.center_y))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let (Some(tl), Some(tr), Some(bl)) = (top_left, top_right, bottom_left) else {
+        return (Vec::new(), 0);
+    };
+
+    // Convert pixel centroids → bounding-box cell centers
+    let (tl_cx, tl_cy) = centroid_to_bbox_center(tl);
+    let (tr_cx, _tr_cy) = centroid_to_bbox_center(tr);
+    let (_bl_cx, bl_cy) = centroid_to_bbox_center(bl);
+
+    let cols_f = (column_count - 1) as f32;
+    let rows_f = (row_count - 1) as f32;
+
+    let step_x = (tr_cx - tl_cx) / cols_f;
+    let step_y = (bl_cy - tl_cy) / rows_f;
+
+    // Sampling radius: ~15% of the step to stay well inside the triangle body
+    let sample_radius = ((step_x * 0.15).round() as u32).max(2);
+
+    eprintln!(
+        "DEBUG grid: origin=({:.1},{:.1}) step=({:.1},{:.1}) radius={}",
+        tl_cx, tl_cy, step_x, step_y, sample_radius
+    );
+
+    let mut bits: Vec<bool> = Vec::new();
+
+    for row in 0..row_count {
+        for col in 0..column_count {
+            // Skip the 8 fixed orientation-mark cells (first & last row, first
+            // 2 and last 2 columns).
+            let is_edge_row = row == 0 || row == row_count - 1;
+            let is_mark_col =
+                col == 0 || col == 1 || col == column_count - 2 || col == column_count - 1;
+
+            if is_edge_row && is_mark_col {
+                continue;
+            }
+
+            let cx = tl_cx + col as f32 * step_x;
+            let cy = tl_cy + row as f32 * step_y;
+
+            bits.push(sample_region_is_dark(img, cx, cy, sample_radius));
+        }
+    }
+
+    let bit_count = bits.len();
+
+    // Pack bits into bytes (MSB first)
+    let bytes: Vec<u8> = bits
+        .chunks(8)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .enumerate()
+                .fold(0u8, |acc, (i, &b)| acc | ((b as u8) << (7 - i)))
+        })
+        .collect();
+
+    (bytes, bit_count)
 }
 
 /// Draw red rectangles on the image based on triangle bounding boxes
