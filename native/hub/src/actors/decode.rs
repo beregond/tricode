@@ -28,10 +28,32 @@ impl Notifiable<ImageBytes> for DecodeActor {
         
         // Decode the image using the tricode crate
         let signal = match tricode::decode_image(&msg.bytes) {
-            Ok(text) => DecodeResult { success: true, text, error: String::new() },
+            Ok(debug) => DecodeResult {
+                success: debug.text.is_some(),
+                text: debug.text.unwrap_or_default(),
+                error: debug.error.unwrap_or_default(),
+                image_width: debug.image_width,
+                image_height: debug.image_height,
+                total_triangles: debug.total_triangles as u32,
+                row_count: debug.row_count as u32,
+                column_count: debug.column_count as u32,
+                bit_count: debug.bit_count as u32,
+                annotated_image: debug.annotated_png,
+            },
             Err(e) => {
                 debug_print!("Error decoding image: {}", e);
-                DecodeResult { success: false, text: String::new(), error: e }
+                DecodeResult {
+                    success: false,
+                    text: String::new(),
+                    error: e,
+                    image_width: 0,
+                    image_height: 0,
+                    total_triangles: 0,
+                    row_count: 0,
+                    column_count: 0,
+                    bit_count: 0,
+                    annotated_image: Vec::new(),
+                }
             }
         };
         

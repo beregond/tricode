@@ -1,6 +1,6 @@
-use crate::signals::{BigBool, GeneratedBytes, GeneratedImage, SmallNumber, SmallText};
+use crate::signals::{GeneratedImage, SmallText};
 use async_trait::async_trait;
-use messages::prelude::{Actor, Address, Context, Handler, Notifiable};
+use messages::prelude::{Actor, Address, Context, Notifiable};
 use rinf::{DartSignal, RustSignal, debug_print};
 use tokio::task::JoinSet;
 
@@ -32,14 +32,6 @@ impl GenerationActor {
 impl Notifiable<SmallText> for GenerationActor {
     async fn notify(&mut self, msg: SmallText, _: &Context<Self>) {
         debug_print!("Received text: {}", msg.text);
-        SmallNumber { number: 7 }.send_signal_to_dart();
-        //return;
-        // TODO: I guess remove few lines below?
-        let generated_bytes = tricode::generate_code(&msg.text);
-        GeneratedBytes {
-            bytes: generated_bytes,
-        }
-        .send_signal_to_dart();
 
         let png_bytes = tricode::generate_image(&msg.text, msg.width_ratio, msg.height_ratio);
         if !png_bytes.is_empty() {
@@ -48,17 +40,6 @@ impl Notifiable<SmallText> for GenerationActor {
             }
             .send_signal_to_dart();
         }
-    }
-}
-
-// Implementing the `Handler` trait
-// allows an actor's loop to respond to a specific message type.
-#[async_trait]
-impl Handler<BigBool> for GenerationActor {
-    type Result = bool;
-    async fn handle(&mut self, msg: BigBool, _: &Context<Self>) -> bool {
-        msg.send_signal_to_dart();
-        false
     }
 }
 

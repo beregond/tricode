@@ -4,11 +4,6 @@ use imageproc::contrast::{threshold, ThresholdType};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use serde::{Deserialize, Serialize};
 
-pub fn generate_code(message: &str) -> Vec<u8> {
-    // Return the input string as raw bytes for now.
-    message.as_bytes().to_vec()
-}
-
 /// Generates a PNG image encoding the payload text.
 /// The payload is first encoded with Reed-Solomon error correction,
 /// then the binary data is visualized as pixels: 0 bits = white, 1 bits = black.
@@ -403,7 +398,21 @@ pub fn reed_solomon_decode(encoded_data: Vec<u8>) -> Result<Vec<u8>, String> {
 /// Decodes a PNG image back to the original text payload.
 /// Currently returns dummy text for testing.
 /// TODO: Implement actual image decoding and Reed-Solomon error correction.
-pub fn decode_image(png_bytes: &[u8]) -> Result<String, String> {
+/// Debug information collected during image decoding.
+#[derive(Debug, Clone)]
+pub struct DecodeDebug {
+    pub text: Option<String>,  // Some on success, None on decode failure
+    pub error: Option<String>, // Some on failure, None on success
+    pub image_width: u32,
+    pub image_height: u32,
+    pub total_triangles: usize,
+    pub row_count: usize,
+    pub column_count: usize,
+    pub bit_count: usize,
+    pub annotated_png: Vec<u8>,
+}
+
+pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
     if png_bytes.is_empty() {
         return Err("Empty image data".to_string());
     }
@@ -422,27 +431,141 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<String, String> {
     // Select 4 corner triangles
     let outermost = select_outermost_triangles(&triangles, 4);
 
-    // Count rows by finding two corners with different orientations
-    let row_count = calculate_row_count(&outermost);
-    eprintln!("DEBUG: Detected {} rows", row_count);
+    // Count rows and columns — naive method first, new methods as fallback.
+    let row_naive = calculate_row_count(&outermost);
+    let col_naive = calculate_column_count(&triangles, &outermost);
 
-    // Count columns from corner spacing
-    let column_count = calculate_column_count(&triangles, &outermost);
-    eprintln!("DEBUG: Detected {} columns", column_count);
-
-    // Draw rectangles on the image
+    // Draw rectangles on the annotated image
     let mut annotated_img = img.clone();
     draw_rectangles(&mut annotated_img, &outermost);
 
-    // Read data bits by sampling each triangle cell center
-    let (bits, bit_count) = read_bits_from_grid(&gray_img, row_count, column_count, &outermost);
-    eprintln!("DEBUG: Read {} data bits ({} bytes)", bit_count, bits.len());
+    // Encode annotated image to PNG bytes
+    let mut annotated_png = Vec::new();
+    PngEncoder::new(&mut annotated_png)
+        .write_image(
+            annotated_img.as_raw(),
+            annotated_img.width(),
+            annotated_img.height(),
+            ExtendedColorType::Rgba8,
+        )
+        .map_err(|e| format!("Failed to encode annotated image: {}", e))?;
 
-    // Decode with Reed-Solomon and return the recovered text
-    let decoded_bytes = reed_solomon_decode(bits.to_vec())
-        .map_err(|e| format!("Reed-Solomon decode failed: {}", e))?;
+    // Helper: attempt a full decode with the given row/col counts.
+    let try_decode = |rows: usize, cols: usize| -> Result<String, String> {
+        let (bits, _) = read_bits_from_grid(&gray_img, rows, cols, &outermost);
+        let decoded_bytes = reed_solomon_decode(bits)?;
+        String::from_utf8(decoded_bytes)
+            .map_err(|e| format!("Decoded data is not valid UTF-8: {}", e))
+    };
 
-    String::from_utf8(decoded_bytes).map_err(|e| format!("Decoded data is not valid UTF-8: {}", e))
+    // --- Attempt 1: naive row/col values ---
+    eprintln!("DEBUG attempt 1: rows={} cols={}", row_naive, col_naive);
+    match try_decode(row_naive, col_naive) {
+        Ok(text) => {
+            return Ok(DecodeDebug {
+                text: Some(text),
+                error: None,
+                image_width: gray_img.width(),
+                image_height: gray_img.height(),
+                total_triangles: triangles.len(),
+                row_count: row_naive,
+                column_count: col_naive,
+                bit_count: {
+                    let (_, bc) = read_bits_from_grid(&gray_img, row_naive, col_naive, &outermost);
+                    bc
+                },
+                annotated_png: annotated_png.clone(),
+            });
+        }
+        Err(e1) => {
+            eprintln!("DEBUG attempt 1 failed: {}", e1);
+
+            // --- Attempt 2: cluster + pitch estimates, clamped to naive ± 1 ---
+            let row_raw = count_rows_by_clustering(&triangles);
+            let (col_raw, pitch_px) = count_columns_by_pitch(&triangles, &outermost);
+            // Clamp: don't deviate more than 1 from naive — wilder guesses are
+            // left to the caller or future attempts.
+            let row_adj = row_raw.clamp(row_naive.saturating_sub(1), row_naive + 1);
+            let col_adj = col_raw.clamp(col_naive.saturating_sub(1), col_naive + 1);
+            eprintln!(
+                "DEBUG attempt 2: rows={} (raw {}) cols={} (raw {}, pitch={:.1}px)",
+                row_adj, row_raw, col_adj, col_raw, pitch_px
+            );
+
+            let (bits2, bit_count2) = read_bits_from_grid(&gray_img, row_adj, col_adj, &outermost);
+
+            let debug = DecodeDebug {
+                text: None,
+                error: None,
+                image_width: gray_img.width(),
+                image_height: gray_img.height(),
+                total_triangles: triangles.len(),
+                row_count: row_adj,
+                column_count: col_adj,
+                bit_count: bit_count2,
+                annotated_png,
+            };
+
+            // Attempt 2 result — succeed immediately, or fall through to attempt 3.
+            let _e2_msg = match reed_solomon_decode(bits2) {
+                Ok(decoded_bytes) => match String::from_utf8(decoded_bytes) {
+                    Ok(text) => {
+                        return Ok(DecodeDebug {
+                            text: Some(text),
+                            ..debug
+                        })
+                    }
+                    Err(e) => format!("decoded data is not valid UTF-8: {}", e),
+                },
+                Err(e) => e,
+            };
+
+            // --- Attempt 3: try all ±1 permutations of (row_adj, col_adj) ---
+            let offsets: &[(isize, isize)] = &[
+                (-1, -1),
+                (-1, 0),
+                (-1, 1),
+                (0, -1),
+                (0, 1),
+                (1, -1),
+                (1, 0),
+                (1, 1),
+            ];
+            eprintln!(
+                "DEBUG attempt 3: trying ±1 permutations of rows={} cols={}",
+                row_adj, col_adj
+            );
+            for &(dr, dc) in offsets {
+                let r = (row_adj as isize + dr) as usize;
+                let c = (col_adj as isize + dc) as usize;
+                if r < 2 || c < 2 {
+                    continue;
+                }
+                let (bits3, bit_count3) = read_bits_from_grid(&gray_img, r, c, &outermost);
+                if let Ok(decoded) = reed_solomon_decode(bits3) {
+                    if let Ok(text) = String::from_utf8(decoded) {
+                        eprintln!("DEBUG attempt 3 succeeded: rows={} cols={}", r, c);
+                        return Ok(DecodeDebug {
+                            text: Some(text),
+                            row_count: r,
+                            column_count: c,
+                            bit_count: bit_count3,
+                            ..debug
+                        });
+                    }
+                }
+            }
+
+            // All attempts failed — report with the attempt-2 debug values.
+            Ok(DecodeDebug {
+                error: Some(format!(
+                    "All attempts failed.\n1 (naive rows={} cols={}): {}\n2 (adjusted rows={} cols={}): RS/UTF-8 error\n3 (±1 permutations of rows={} cols={}): all failed",
+                    row_naive, col_naive, e1, row_adj, col_adj, row_adj, col_adj,
+                )),
+                ..debug
+            })
+        }
+    }
 }
 
 /// Represents a detected triangle region
@@ -457,18 +580,6 @@ pub struct Triangle {
     pub min_y: u32,        // Bounding box - top edge
     pub max_x: u32,        // Bounding box - right edge
     pub max_y: u32,        // Bounding box - bottom edge
-}
-
-/// Response structure for decode_image
-#[derive(Debug, Serialize, Deserialize)]
-pub struct DecodeResponse {
-    pub image_width: u32,
-    pub image_height: u32,
-    pub total_triangles: usize,
-    pub orientation_marks: Vec<Triangle>,
-    pub annotated_image: String, // Base64 encoded PNG with red rectangles
-    pub bits: Vec<u8>,           // Packed bytes of decoded bits (MSB first)
-    pub bit_count: usize,        // Number of data bits decoded
 }
 
 /// Find triangles in a grayscale image using connected component analysis
@@ -710,6 +821,137 @@ fn analyze_component(component: &[(u32, u32)], _origin_x: u32, _origin_y: u32) -
 }
 
 /// Calculate the number of rows based on corner triangles with different orientations
+/// Approach 2: count distinct row clusters by grouping all triangles on their
+/// center_y with a tolerance of ~half a cell height.
+///
+/// Returns the cluster count, or 0 if triangles is empty.
+fn count_rows_by_clustering(triangles: &[Triangle]) -> usize {
+    if triangles.is_empty() {
+        return 0;
+    }
+
+    // Estimate a single cell height from the median bounding-box height.
+    let mut heights: Vec<f32> = triangles
+        .iter()
+        .map(|t| (t.max_y - t.min_y) as f32)
+        .collect();
+    heights.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let cell_h = heights[heights.len() / 2].max(1.0);
+    let tolerance = cell_h * 0.5;
+
+    // Collect center_y values sorted ascending.
+    let mut ys: Vec<f32> = triangles.iter().map(|t| t.center_y).collect();
+    ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Walk through sorted y values; start a new cluster whenever the gap from
+    // the current cluster mean exceeds the tolerance.
+    let mut clusters: Vec<f32> = Vec::new(); // stores the running mean of each cluster
+    for y in ys {
+        if let Some(mean) = clusters.last_mut() {
+            if (y - *mean).abs() <= tolerance {
+                // Blend y into the running mean (simple online mean).
+                // We use the cluster index to keep a proper average.
+                // Since we only need the count, a running mean is fine.
+                *mean = (*mean + y) / 2.0;
+                continue;
+            }
+        }
+        clusters.push(y);
+    }
+
+    clusters.len()
+}
+
+/// Approach 3: estimate the horizontal cell pitch from the mode of all
+/// pairwise Δcenter_x values among triangles that share the same approximate
+/// row, then derive the column count from the corner span divided by that
+/// pitch.
+///
+/// Returns (column_count, pitch_px).
+fn count_columns_by_pitch(triangles: &[Triangle], corners: &[Triangle]) -> (usize, f32) {
+    if triangles.len() < 2 {
+        return (0, 1.0);
+    }
+
+    // Estimate cell height for row grouping (same as above).
+    let mut heights: Vec<f32> = triangles
+        .iter()
+        .map(|t| (t.max_y - t.min_y) as f32)
+        .collect();
+    heights.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let cell_h = heights[heights.len() / 2].max(1.0);
+    let row_tol = cell_h * 0.5;
+
+    // Group triangles into rows by center_y clusters (reuse the same logic).
+    let mut sorted: Vec<&Triangle> = triangles.iter().collect();
+    sorted.sort_by(|a, b| {
+        a.center_y
+            .partial_cmp(&b.center_y)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Proper row grouping with (mean_y, xs) tuples.
+    let mut rows: Vec<(f32, Vec<f32>)> = Vec::new();
+    for t in &sorted {
+        if let Some((mean_y, xs)) = rows.last_mut() {
+            if (t.center_y - *mean_y).abs() <= row_tol {
+                xs.push(t.center_x);
+                *mean_y = (*mean_y + t.center_y) / 2.0;
+                continue;
+            }
+        }
+        rows.push((t.center_y, vec![t.center_x]));
+    }
+
+    // Collect all adjacent Δx values within every row.
+    let mut deltas: Vec<f32> = Vec::new();
+    for (_, xs) in &mut rows {
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        for pair in xs.windows(2) {
+            let d = pair[1] - pair[0];
+            if d > 1.0 {
+                // ignore duplicates / noise
+                deltas.push(d);
+            }
+        }
+    }
+
+    if deltas.is_empty() {
+        return (0, 1.0);
+    }
+
+    // Find the mode of deltas by bucketing into bins of width ~2 px and
+    // picking the bin with the most entries.  The bin centre is the pitch.
+    deltas.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let min_d = deltas[0];
+    let bin_width = 3.0_f32; // px — coarse enough to group near-identical values
+    let num_bins = ((deltas.last().copied().unwrap_or(min_d) - min_d) / bin_width) as usize + 1;
+    let mut bins = vec![0usize; num_bins.max(1)];
+    for &d in &deltas {
+        let b = ((d - min_d) / bin_width) as usize;
+        let b = b.min(bins.len() - 1);
+        bins[b] += 1;
+    }
+    let best_bin = bins
+        .iter()
+        .enumerate()
+        .max_by_key(|&(_, &c)| c)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let pitch = min_d + best_bin as f32 * bin_width + bin_width / 2.0;
+
+    // Derive column count from the corner-to-corner horizontal span.
+    if corners.len() < 2 {
+        return (0, pitch);
+    }
+    let min_cx = corners.iter().map(|t| t.center_x).fold(f32::MAX, f32::min);
+    let max_cx = corners.iter().map(|t| t.center_x).fold(f32::MIN, f32::max);
+    let span = (max_cx - min_cx).abs();
+    let col_count = (span / pitch).round() as usize + 1;
+
+    (col_count, pitch)
+}
+
 fn calculate_row_count(corners: &[Triangle]) -> usize {
     if corners.len() < 2 {
         return 0;
@@ -1053,35 +1295,4 @@ fn draw_rectangles(img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>, triangles: &[Triang
             }
         }
     }
-}
-
-/// Encode bytes to base64
-fn base64_encode(data: &[u8]) -> String {
-    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::new();
-
-    for chunk in data.chunks(3) {
-        let b1 = chunk[0];
-        let b2 = if chunk.len() > 1 { chunk[1] } else { 0 };
-        let b3 = if chunk.len() > 2 { chunk[2] } else { 0 };
-
-        let n = ((b1 as u32) << 16) | ((b2 as u32) << 8) | (b3 as u32);
-
-        result.push(CHARSET[((n >> 18) & 63) as usize] as char);
-        result.push(CHARSET[((n >> 12) & 63) as usize] as char);
-
-        if chunk.len() > 1 {
-            result.push(CHARSET[((n >> 6) & 63) as usize] as char);
-        } else {
-            result.push('=');
-        }
-
-        if chunk.len() > 2 {
-            result.push(CHARSET[(n & 63) as usize] as char);
-        } else {
-            result.push('=');
-        }
-    }
-
-    result
 }

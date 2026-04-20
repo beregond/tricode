@@ -1,8 +1,9 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
-import 'dart:typed_data';
 import 'dart:ui' as ui;
+
+import 'package:flutter/foundation.dart';
 
 import 'package:flutter/material.dart';
 import 'package:rinf/rinf.dart';
@@ -75,6 +76,7 @@ class _MyHomePageState extends State<MyHomePage>
   bool? _decodeSuccess;
   String? _decodeText;
   String? _decodeError;
+  DecodeResult? _decodeDebug;
 
   bool get _shouldShowZoomControls {
     if (_imageWidth == null || _imageHeight == null) return false;
@@ -96,6 +98,7 @@ class _MyHomePageState extends State<MyHomePage>
           _decodeSuccess = null;
           _decodeText = null;
           _decodeError = null;
+          _decodeDebug = null;
           _isDecoding = false;
         });
       }
@@ -166,6 +169,7 @@ class _MyHomePageState extends State<MyHomePage>
         _decodeSuccess = msg.success;
         _decodeText = msg.success ? msg.text : null;
         _decodeError = msg.success ? null : msg.error;
+        _decodeDebug = kDebugMode ? msg : null;
       });
     });
   }
@@ -396,6 +400,57 @@ class _MyHomePageState extends State<MyHomePage>
                           ),
                         ),
                       ],
+                      if (kDebugMode && _decodeDebug != null) ...[
+                        const SizedBox(height: 24),
+                        const Divider(),
+                        const SizedBox(height: 8),
+                        const Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            'Debug info',
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.grey,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        _DebugTable(_decodeDebug!),
+                        if (_decodeDebug!.annotatedImage.isNotEmpty) ...[
+                          const SizedBox(height: 12),
+                          const Align(
+                            alignment: Alignment.centerLeft,
+                            child: Text(
+                              'Annotated image:',
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: Colors.grey,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Container(
+                            constraints: const BoxConstraints(
+                              maxWidth: 400,
+                              maxHeight: 400,
+                            ),
+                            decoration: BoxDecoration(
+                              border: Border.all(color: Colors.grey),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(7),
+                              child: Image.memory(
+                                Uint8List.fromList(
+                                  _decodeDebug!.annotatedImage,
+                                ),
+                                fit: BoxFit.contain,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
                     ],
                   ),
                 ),
@@ -578,5 +633,43 @@ class _MyHomePageState extends State<MyHomePage>
     _widthRatioController.dispose();
     _heightRatioController.dispose();
     super.dispose();
+  }
+}
+
+class _DebugTable extends StatelessWidget {
+  const _DebugTable(this.result);
+  final DecodeResult result;
+
+  @override
+  Widget build(BuildContext context) {
+    final rows = [
+      ('Image size', '${result.imageWidth} × ${result.imageHeight} px'),
+      ('Triangles found', '${result.totalTriangles}'),
+      ('Grid', '${result.rowCount} rows × ${result.columnCount} columns'),
+      ('Data bits', '${result.bitCount}'),
+    ];
+    return Table(
+      columnWidths: const {0: IntrinsicColumnWidth(), 1: FlexColumnWidth()},
+      children: rows.map((row) {
+        return TableRow(
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(right: 16, bottom: 4),
+              child: Text(
+                row.$1,
+                style: const TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Text(
+                row.$2,
+                style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+              ),
+            ),
+          ],
+        );
+      }).toList(),
+    );
   }
 }
