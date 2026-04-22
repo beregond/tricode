@@ -4,6 +4,17 @@ use imageproc::contrast::{threshold, ThresholdType};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use serde::{Deserialize, Serialize};
 
+/// Debug information collected during image generation.
+#[derive(Debug, Clone)]
+pub struct GenerateDebug {
+    pub png_bytes: Vec<u8>,
+    pub encoded_bytes: usize,  // bytes after Reed-Solomon encoding
+    pub grid_rows: u32,
+    pub grid_columns: u32,
+    pub data_bits_used: usize, // bits actually written from encoded_data
+    pub padding_bits: usize,   // zero-fill bits to complete the grid
+}
+
 /// Generates a PNG image encoding the payload text.
 /// The payload is first encoded with Reed-Solomon error correction,
 /// then the binary data is visualized as pixels: 0 bits = white, 1 bits = black.
@@ -15,7 +26,18 @@ pub fn generate_image(payload: &str, width_ratio: u32, height_ratio: u32) -> Vec
         Err(_) => return Vec::new(), // Return empty on encoding error
     };
 
-    create_image_from_binary_data(&encoded_data, width_ratio, height_ratio)
+    create_image_from_binary_data(&encoded_data, width_ratio, height_ratio).png_bytes
+}
+
+/// Generates a PNG image encoding the payload text, returning full debug info.
+pub fn generate_image_debug(payload: &str, width_ratio: u32, height_ratio: u32) -> Option<GenerateDebug> {
+    let payload_bytes = payload.as_bytes().to_vec();
+    let encoded_data = match reed_solomon_encode(payload_bytes) {
+        Ok(data) => data,
+        Err(_) => return None,
+    };
+
+    Some(create_image_from_binary_data(&encoded_data, width_ratio, height_ratio))
 }
 
 /// Creates a PNG image from binary data maintaining the specified aspect ratio.
@@ -25,7 +47,7 @@ fn create_image_from_binary_data(
     encoded_data: &[u8],
     width_ratio: u32,
     height_ratio: u32,
-) -> Vec<u8> {
+) -> GenerateDebug {
     const PIXELS_PER_BIT_WIDTH: u32 = 51; // Bit box width in pixels
     let pixels_per_bit_height =
         ((PIXELS_PER_BIT_WIDTH as f64) * (3.0_f64.sqrt() / 2.0)).ceil() as u32;
@@ -156,10 +178,29 @@ fn create_image_from_binary_data(
         .write_image(img.as_raw(), width, height, ExtendedColorType::Rgba8)
         .is_err()
     {
-        return Vec::new();
+        return GenerateDebug {
+            png_bytes: Vec::new(),
+            encoded_bytes: encoded_data.len(),
+            grid_rows: height_squares,
+            grid_columns: width_squares,
+            data_bits_used: bit_index,
+            padding_bits: 0,
+        };
     }
 
-    png_bytes
+    let grid_cells = (width_squares * height_squares) as usize;
+    let orientation_cells = 8;
+    let data_capacity = grid_cells.saturating_sub(orientation_cells);
+    let padding_bits = data_capacity.saturating_sub(bit_index);
+
+    GenerateDebug {
+        png_bytes,
+        encoded_bytes: encoded_data.len(),
+        grid_rows: height_squares,
+        grid_columns: width_squares,
+        data_bits_used: bit_index,
+        padding_bits,
+    }
 }
 
 /// Calculate greatest common divisor for ratio normalization
@@ -410,6 +451,9 @@ pub struct DecodeDebug {
     pub column_count: usize,
     pub bit_count: usize,
     pub annotated_png: Vec<u8>,
+    /// Which decode attempt succeeded (or was last tried on failure):
+    /// "naive", "cluster+pitch", "brute-force ±1", or "all failed".
+    pub decode_method: String,
 }
 
 pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
@@ -475,6 +519,7 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
                     bc
                 },
                 annotated_png: annotated_png.clone(),
+                decode_method: "naive".to_string(),
             });
         }
         Err(e1) => {
@@ -504,6 +549,7 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
                 column_count: col_adj,
                 bit_count: bit_count2,
                 annotated_png,
+                decode_method: String::new(), // filled in by each subsequent return
             };
 
             // Attempt 2 result — succeed immediately, or fall through to attempt 3.
@@ -512,6 +558,7 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
                     Ok(text) => {
                         return Ok(DecodeDebug {
                             text: Some(text),
+                            decode_method: "cluster+pitch".to_string(),
                             ..debug
                         })
                     }
@@ -550,6 +597,7 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
                             row_count: r,
                             column_count: c,
                             bit_count: bit_count3,
+                            decode_method: "brute-force ±1".to_string(),
                             ..debug
                         });
                     }
@@ -562,6 +610,7 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
                     "All attempts failed.\n1 (naive rows={} cols={}): {}\n2 (adjusted rows={} cols={}): RS/UTF-8 error\n3 (±1 permutations of rows={} cols={}): all failed",
                     row_naive, col_naive, e1, row_adj, col_adj, row_adj, col_adj,
                 )),
+                decode_method: "all failed".to_string(),
                 ..debug
             })
         }
@@ -1053,6 +1102,9 @@ fn calculate_column_count(triangles: &[Triangle], corners: &[Triangle]) -> usize
     let distance = (right.center_x - left.center_x).abs();
     let m = (distance / median_width).round() as usize;
 
+    if m < 2 {
+        return 0;
+    }
     2 * (m - 2) + 1
 }
 

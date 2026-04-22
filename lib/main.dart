@@ -75,8 +75,9 @@ class _MyHomePageState extends State<MyHomePage>
   bool _isDecoding = false;
   bool? _decodeSuccess;
   String? _decodeText;
-  String? _decodeError;
   DecodeResult? _decodeDebug;
+  GeneratedImage? _generateDebug;
+  bool _showDebugInfo = false;
 
   bool get _shouldShowZoomControls {
     if (_imageWidth == null || _imageHeight == null) return false;
@@ -97,7 +98,6 @@ class _MyHomePageState extends State<MyHomePage>
         setState(() {
           _decodeSuccess = null;
           _decodeText = null;
-          _decodeError = null;
           _decodeDebug = null;
           _isDecoding = false;
         });
@@ -112,6 +112,7 @@ class _MyHomePageState extends State<MyHomePage>
           _imageWidth = null;
           _imageHeight = null;
           _isGenerating = false;
+          _generateDebug = null;
         });
       }
     });
@@ -139,6 +140,7 @@ class _MyHomePageState extends State<MyHomePage>
     }
 
     _textController.addListener(clearPreviewIfChanged);
+    _textController.addListener(() => setState(() {}));
     _widthRatioController.addListener(clearPreviewIfChanged);
     _heightRatioController.addListener(clearPreviewIfChanged);
 
@@ -158,6 +160,7 @@ class _MyHomePageState extends State<MyHomePage>
         _imageHeight = image.height;
         _zoomLevel = 1.0; // Reset zoom when new image is generated
         _isGenerating = false; // Stop loading indicator
+        _generateDebug = signal.message;
       });
     });
 
@@ -168,8 +171,7 @@ class _MyHomePageState extends State<MyHomePage>
         _isDecoding = false;
         _decodeSuccess = msg.success;
         _decodeText = msg.success ? msg.text : null;
-        _decodeError = msg.success ? null : msg.error;
-        _decodeDebug = kDebugMode ? msg : null;
+        _decodeDebug = msg;
       });
     });
   }
@@ -214,7 +216,6 @@ class _MyHomePageState extends State<MyHomePage>
         _isDecoding = true;
         _decodeSuccess = null;
         _decodeText = null;
-        _decodeError = null;
       });
 
       ImageBytes(bytes: bytes.toList()).sendSignalToRust();
@@ -312,6 +313,36 @@ class _MyHomePageState extends State<MyHomePage>
         appBar: AppBar(
           backgroundColor: Theme.of(context).colorScheme.inversePrimary,
           title: const Text('Tricode'),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.settings),
+              tooltip: 'Settings',
+              onPressed: () {
+                showDialog<void>(
+                  context: context,
+                  builder: (context) => StatefulBuilder(
+                    builder: (context, setDialogState) => AlertDialog(
+                      title: const Text('Settings'),
+                      content: CheckboxListTile(
+                        title: const Text('Show debug info'),
+                        value: _showDebugInfo,
+                        onChanged: (value) {
+                          setDialogState(() {});
+                          setState(() => _showDebugInfo = value ?? false);
+                        },
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.of(context).pop(),
+                          child: const Text('Close'),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
           bottom: TabBar(
             controller: _tabController,
             tabs: const [
@@ -376,31 +407,15 @@ class _MyHomePageState extends State<MyHomePage>
                         ),
                       ] else if (_decodeSuccess == false) ...[
                         const Text(
-                          'Decoding failed:',
+                          'Decoding failed',
                           style: TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.bold,
                             color: Colors.red,
                           ),
                         ),
-                        const SizedBox(height: 8),
-                        Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(16.0),
-                          decoration: BoxDecoration(
-                            border: Border.all(color: Colors.red),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: SelectableText(
-                            _decodeError!,
-                            style: const TextStyle(
-                              fontSize: 14,
-                              color: Colors.red,
-                            ),
-                          ),
-                        ),
                       ],
-                      if (kDebugMode && _decodeDebug != null) ...[
+                      if (_showDebugInfo && _decodeDebug != null) ...[
                         const SizedBox(height: 24),
                         const Divider(),
                         const SizedBox(height: 8),
@@ -516,7 +531,9 @@ class _MyHomePageState extends State<MyHomePage>
                     ),
                     const SizedBox(height: 16),
                     ElevatedButton(
-                      onPressed: _sendTextToRust,
+                      onPressed: _textController.text.trim().isEmpty
+                          ? null
+                          : _sendTextToRust,
                       child: const Text('Generate'),
                     ),
                     const SizedBox(height: 20),
@@ -612,6 +629,30 @@ class _MyHomePageState extends State<MyHomePage>
                           ],
                         ),
                       ],
+                      if (_showDebugInfo && _generateDebug != null) ...[
+                        const SizedBox(height: 24),
+                        const Divider(),
+                        const SizedBox(height: 8),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                          child: const Align(
+                            alignment: Alignment.centerLeft,
+                            child: Text(
+                              'Debug info',
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.grey,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                          child: _GenerateDebugTable(_generateDebug!),
+                        ),
+                      ],
                       const SizedBox(height: 20),
                     ],
                   ],
@@ -643,10 +684,52 @@ class _DebugTable extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final rows = [
+      (
+        'Decode method',
+        result.decodeMethod.isEmpty ? '—' : result.decodeMethod,
+      ),
       ('Image size', '${result.imageWidth} × ${result.imageHeight} px'),
       ('Triangles found', '${result.totalTriangles}'),
       ('Grid', '${result.rowCount} rows × ${result.columnCount} columns'),
       ('Data bits', '${result.bitCount}'),
+    ];
+    return Table(
+      columnWidths: const {0: IntrinsicColumnWidth(), 1: FlexColumnWidth()},
+      children: rows.map((row) {
+        return TableRow(
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(right: 16, bottom: 4),
+              child: Text(
+                row.$1,
+                style: const TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Text(
+                row.$2,
+                style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+              ),
+            ),
+          ],
+        );
+      }).toList(),
+    );
+  }
+}
+
+class _GenerateDebugTable extends StatelessWidget {
+  const _GenerateDebugTable(this.result);
+  final GeneratedImage result;
+
+  @override
+  Widget build(BuildContext context) {
+    final rows = [
+      ('Grid', '${result.gridRows} rows × ${result.gridColumns} columns'),
+      ('Encoded bytes', '${result.encodedBytes}'),
+      ('Data bits used', '${result.dataBitsUsed}'),
+      ('Padding bits', '${result.paddingBits}'),
     ];
     return Table(
       columnWidths: const {0: IntrinsicColumnWidth(), 1: FlexColumnWidth()},

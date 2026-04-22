@@ -33,12 +33,19 @@ impl Notifiable<SmallText> for GenerationActor {
     async fn notify(&mut self, msg: SmallText, _: &Context<Self>) {
         debug_print!("Received text: {}", msg.text);
 
-        let png_bytes = tricode::generate_image(&msg.text, msg.width_ratio, msg.height_ratio);
-        if !png_bytes.is_empty() {
-            GeneratedImage {
-                png_bytes,
+        let result = tricode::generate_image_debug(&msg.text, msg.width_ratio, msg.height_ratio);
+        if let Some(debug) = result {
+            if !debug.png_bytes.is_empty() {
+                GeneratedImage {
+                    png_bytes: debug.png_bytes,
+                    encoded_bytes: debug.encoded_bytes as u32,
+                    grid_rows: debug.grid_rows,
+                    grid_columns: debug.grid_columns,
+                    data_bits_used: debug.data_bits_used as u32,
+                    padding_bits: debug.padding_bits as u32,
+                }
+                .send_signal_to_dart();
             }
-            .send_signal_to_dart();
         }
     }
 }

@@ -30,10 +30,17 @@ pub struct DecodeResult {
     pub column_count: u32,
     pub bit_count: u32,
     pub annotated_image: Vec<u8>, // PNG bytes of annotated image, empty on early failure
+    pub decode_method: String,    // "naive", "cluster+pitch", "brute-force ±1", or "all failed"
 }
 
 /// PNG image bytes generated from an input payload.
 #[derive(Serialize, RustSignal)]
 pub struct GeneratedImage {
     pub png_bytes: Vec<u8>,
+    // debug info
+    pub encoded_bytes: u32,   // bytes after Reed-Solomon encoding
+    pub grid_rows: u32,
+    pub grid_columns: u32,
+    pub data_bits_used: u32,  // bits written from encoded data
+    pub padding_bits: u32,    // zero-fill bits to complete the grid
 }

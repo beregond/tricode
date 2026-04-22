@@ -39,6 +39,7 @@ impl Notifiable<ImageBytes> for DecodeActor {
                 column_count: debug.column_count as u32,
                 bit_count: debug.bit_count as u32,
                 annotated_image: debug.annotated_png,
+                decode_method: debug.decode_method,
             },
             Err(e) => {
                 debug_print!("Error decoding image: {}", e);
@@ -53,6 +54,7 @@ impl Notifiable<ImageBytes> for DecodeActor {
                     column_count: 0,
                     bit_count: 0,
                     annotated_image: Vec::new(),
+                    decode_method: String::new(),
                 }
             }
         };
