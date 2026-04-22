@@ -7,6 +7,8 @@ pub struct SmallText {
     pub text: String,
     pub width_ratio: u32,
     pub height_ratio: u32,
+    /// 0 = Tiles, 1 = Stain
+    pub style: u32,
 }
 
 /// Image bytes to be decoded.

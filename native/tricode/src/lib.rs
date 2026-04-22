@@ -4,6 +4,24 @@ use imageproc::contrast::{threshold, ThresholdType};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use serde::{Deserialize, Serialize};
 
+/// Visual style for image generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageStyle {
+    /// Black triangles with a 1-pixel gap (border excluded) between neighbours.
+    Tiles,
+    /// Black triangles filled edge-to-edge with no gap.
+    Stain,
+}
+
+impl ImageStyle {
+    pub fn from_u32(v: u32) -> Self {
+        match v {
+            1 => Self::Stain,
+            _ => Self::Tiles,
+        }
+    }
+}
+
 /// Debug information collected during image generation.
 #[derive(Debug, Clone)]
 pub struct GenerateDebug {
@@ -19,25 +37,24 @@ pub struct GenerateDebug {
 /// The payload is first encoded with Reed-Solomon error correction,
 /// then the binary data is visualized as pixels: 0 bits = white, 1 bits = black.
 pub fn generate_image(payload: &str, width_ratio: u32, height_ratio: u32) -> Vec<u8> {
-    // Convert payload to bytes and apply Reed-Solomon encoding
     let payload_bytes = payload.as_bytes().to_vec();
     let encoded_data = match reed_solomon_encode(payload_bytes) {
         Ok(data) => data,
-        Err(_) => return Vec::new(), // Return empty on encoding error
+        Err(_) => return Vec::new(),
     };
 
-    create_image_from_binary_data(&encoded_data, width_ratio, height_ratio).png_bytes
+    create_image_from_binary_data(&encoded_data, width_ratio, height_ratio, ImageStyle::Tiles).png_bytes
 }
 
 /// Generates a PNG image encoding the payload text, returning full debug info.
-pub fn generate_image_debug(payload: &str, width_ratio: u32, height_ratio: u32) -> Option<GenerateDebug> {
+pub fn generate_image_debug(payload: &str, width_ratio: u32, height_ratio: u32, style: ImageStyle) -> Option<GenerateDebug> {
     let payload_bytes = payload.as_bytes().to_vec();
     let encoded_data = match reed_solomon_encode(payload_bytes) {
         Ok(data) => data,
         Err(_) => return None,
     };
 
-    Some(create_image_from_binary_data(&encoded_data, width_ratio, height_ratio))
+    Some(create_image_from_binary_data(&encoded_data, width_ratio, height_ratio, style))
 }
 
 /// Creates a PNG image from binary data maintaining the specified aspect ratio.
@@ -47,6 +64,7 @@ fn create_image_from_binary_data(
     encoded_data: &[u8],
     width_ratio: u32,
     height_ratio: u32,
+    style: ImageStyle,
 ) -> GenerateDebug {
     const PIXELS_PER_BIT_WIDTH: u32 = 51; // Bit box width in pixels
     let pixels_per_bit_height =
@@ -162,7 +180,11 @@ fn create_image_from_binary_data(
                             let is_right_edge = (x - center_x).abs() >= half_width - 1.5;
 
                             let is_border = is_base || is_tip || is_left_edge || is_right_edge;
-                            if !is_border {
+                            let draw = match style {
+                                ImageStyle::Tiles => !is_border,
+                                ImageStyle::Stain => true,
+                            };
+                            if draw {
                                 img.put_pixel(px, py, rgba);
                             }
                         }

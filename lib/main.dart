@@ -73,6 +73,7 @@ class _MyHomePageState extends State<MyHomePage>
   int? _imageHeight;
   bool _isGenerating = false;
   bool _isDecoding = false;
+  int _selectedStyle = 0; // 0 = Tiles, 1 = Stain
   bool? _decodeSuccess;
   String? _decodeText;
   DecodeResult? _decodeDebug;
@@ -113,6 +114,7 @@ class _MyHomePageState extends State<MyHomePage>
           _imageHeight = null;
           _isGenerating = false;
           _generateDebug = null;
+          _selectedStyle = 0;
         });
       }
     });
@@ -135,6 +137,7 @@ class _MyHomePageState extends State<MyHomePage>
           _latestImage = null;
           _imageWidth = null;
           _imageHeight = null;
+          _generateDebug = null;
         });
       }
     }
@@ -193,6 +196,7 @@ class _MyHomePageState extends State<MyHomePage>
       text: text,
       widthRatio: safeWidth,
       heightRatio: safeHeight,
+      style: _selectedStyle,
     ).sendSignalToRust();
   }
 
@@ -528,6 +532,23 @@ class _MyHomePageState extends State<MyHomePage>
                           ),
                         ],
                       ),
+                    ),
+                    const SizedBox(height: 16),
+                    SegmentedButton<int>(
+                      segments: const [
+                        ButtonSegment(value: 0, label: Text('Tiles')),
+                        ButtonSegment(value: 1, label: Text('Stain')),
+                      ],
+                      selected: {_selectedStyle},
+                      onSelectionChanged: (selection) => setState(() {
+                        _selectedStyle = selection.first;
+                        if (_latestImage != null) {
+                          _latestImage = null;
+                          _imageWidth = null;
+                          _imageHeight = null;
+                          _generateDebug = null;
+                        }
+                      }),
                     ),
                     const SizedBox(height: 16),
                     ElevatedButton(
