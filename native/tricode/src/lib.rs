@@ -611,28 +611,34 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
     // Find triangles in the image
     let triangles = find_triangles(&gray_img)?;
 
-    // Select 4 corner triangles
-    let outermost = select_outermost_triangles(&triangles, 4);
+    // Find the four anchor triangles at the grid corners
+    let anchors = find_anchors(&triangles).ok_or("Could not find anchor triangles")?;
 
-    eprintln!("DEBUG outermost triangles ({} found):", outermost.len());
-    for (i, t) in outermost.iter().enumerate() {
-        eprintln!(
-            "  [{}] center=({:.1}, {:.1})  bbox=({}, {})–({}, {})  pointing_{}  area={:.0}",
-            i,
-            t.center_x, t.center_y,
-            t.min_x, t.min_y, t.max_x, t.max_y,
-            if t.pointing_up { "up" } else { "down" },
-            t.area,
-        );
-    }
+    eprintln!("DEBUG anchors:");
+    eprintln!("  top_left:     center=({:.1}, {:.1})  bbox=({}, {})–({}, {})  pointing_{}",
+        anchors.top_left.center_x, anchors.top_left.center_y,
+        anchors.top_left.min_x, anchors.top_left.min_y, anchors.top_left.max_x, anchors.top_left.max_y,
+        if anchors.top_left.pointing_up { "up" } else { "down" });
+    eprintln!("  top_right:    center=({:.1}, {:.1})  bbox=({}, {})–({}, {})  pointing_{}",
+        anchors.top_right.center_x, anchors.top_right.center_y,
+        anchors.top_right.min_x, anchors.top_right.min_y, anchors.top_right.max_x, anchors.top_right.max_y,
+        if anchors.top_right.pointing_up { "up" } else { "down" });
+    eprintln!("  bottom_left:  center=({:.1}, {:.1})  bbox=({}, {})–({}, {})  pointing_{}",
+        anchors.bottom_left.center_x, anchors.bottom_left.center_y,
+        anchors.bottom_left.min_x, anchors.bottom_left.min_y, anchors.bottom_left.max_x, anchors.bottom_left.max_y,
+        if anchors.bottom_left.pointing_up { "up" } else { "down" });
+    eprintln!("  bottom_right: center=({:.1}, {:.1})  bbox=({}, {})–({}, {})  pointing_{}",
+        anchors.bottom_right.center_x, anchors.bottom_right.center_y,
+        anchors.bottom_right.min_x, anchors.bottom_right.min_y, anchors.bottom_right.max_x, anchors.bottom_right.max_y,
+        if anchors.bottom_right.pointing_up { "up" } else { "down" });
 
     // Count rows and columns — naive method first, new methods as fallback.
-    let row_naive = calculate_row_count(&outermost);
-    let col_naive = calculate_column_count(&triangles, &outermost);
+    let row_naive = calculate_row_count(&anchors);
+    let col_naive = calculate_column_count(&triangles, &anchors);
 
     // Draw rectangles on the annotated image
     let mut annotated_img = img.clone();
-    draw_rectangles(&mut annotated_img, &outermost);
+    draw_rectangles(&mut annotated_img, &anchors);
 
     // Encode annotated image to PNG bytes
     let mut annotated_png = Vec::new();
@@ -647,7 +653,7 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
 
     // Helper: attempt a full decode with the given row/col counts.
     let try_decode = |rows: usize, cols: usize| -> Result<(String, String), String> {
-        let (bits, _) = read_bits_from_grid(&gray_img, rows, cols, &outermost);
+        let (bits, _) = read_bits_from_grid(&gray_img, rows, cols, &anchors);
         let decoded_bytes = reed_solomon_decode(bits)?;
         unpack_payload(&decoded_bytes)
     };
@@ -666,7 +672,7 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
                 row_count: row_naive,
                 column_count: col_naive,
                 bit_count: {
-                    let (_, bc) = read_bits_from_grid(&gray_img, row_naive, col_naive, &outermost);
+                    let (_, bc) = read_bits_from_grid(&gray_img, row_naive, col_naive, &anchors);
                     bc
                 },
                 annotated_png: annotated_png.clone(),
@@ -678,9 +684,7 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
 
             // --- Attempt 2: cluster + pitch estimates, clamped to naive ± 1 ---
             let row_raw = count_rows_by_clustering(&triangles);
-            let (col_raw, pitch_px) = count_columns_by_pitch(&triangles, &outermost);
-            // Clamp: don't deviate more than 1 from naive — wilder guesses are
-            // left to the caller or future attempts.
+            let (col_raw, pitch_px) = count_columns_by_pitch(&triangles, &anchors);
             let row_adj = row_raw.clamp(row_naive.saturating_sub(1), row_naive + 1);
             let col_adj = col_raw.clamp(col_naive.saturating_sub(1), col_naive + 1);
             eprintln!(
@@ -688,7 +692,7 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
                 row_adj, row_raw, col_adj, col_raw, pitch_px
             );
 
-            let (bits2, bit_count2) = read_bits_from_grid(&gray_img, row_adj, col_adj, &outermost);
+            let (bits2, bit_count2) = read_bits_from_grid(&gray_img, row_adj, col_adj, &anchors);
 
             let debug = DecodeDebug {
                 text: None,
@@ -741,7 +745,7 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
                 if r < 2 || c < 2 {
                     continue;
                 }
-                let (bits3, bit_count3) = read_bits_from_grid(&gray_img, r, c, &outermost);
+                let (bits3, bit_count3) = read_bits_from_grid(&gray_img, r, c, &anchors);
                 if let Ok(decoded) = reed_solomon_decode(bits3) {
                     if let Ok((kind, text)) = unpack_payload(&decoded) {
                         eprintln!("DEBUG attempt 3 succeeded: rows={} cols={}", r, c);
@@ -1071,7 +1075,7 @@ fn count_rows_by_clustering(triangles: &[Triangle]) -> usize {
 /// pitch.
 ///
 /// Returns (column_count, pitch_px).
-fn count_columns_by_pitch(triangles: &[Triangle], corners: &[Triangle]) -> (usize, f32) {
+fn count_columns_by_pitch(triangles: &[Triangle], anchors: &Anchors) -> (usize, f32) {
     if triangles.len() < 2 {
         return (0, 1.0);
     }
@@ -1143,114 +1147,51 @@ fn count_columns_by_pitch(triangles: &[Triangle], corners: &[Triangle]) -> (usiz
         .unwrap_or(0);
     let pitch = min_d + best_bin as f32 * bin_width + bin_width / 2.0;
 
-    // Derive column count from the corner-to-corner horizontal span.
-    if corners.len() < 2 {
-        return (0, pitch);
-    }
-    let min_cx = corners.iter().map(|t| t.center_x).fold(f32::MAX, f32::min);
-    let max_cx = corners.iter().map(|t| t.center_x).fold(f32::MIN, f32::max);
+    // Derive column count from the top anchor horizontal span.
+    let min_cx = anchors.top_left.center_x.min(anchors.bottom_left.center_x);
+    let max_cx = anchors.top_right.center_x.max(anchors.bottom_right.center_x);
     let span = (max_cx - min_cx).abs();
     let col_count = (span / pitch).round() as usize + 1;
 
     (col_count, pitch)
 }
 
-fn calculate_row_count(corners: &[Triangle]) -> usize {
-    if corners.len() < 2 {
-        return 0;
+fn calculate_row_count(anchors: &Anchors) -> usize {
+    // Use top-left and bottom-left which are on the same column — most reliable vertical span.
+    let top = &anchors.top_left;
+    let bottom = &anchors.bottom_left;
+
+    let vertical_distance = ((top.min_y as f32) - (bottom.max_y as f32)).abs();
+    let height1 = (top.max_y - top.min_y) as f32;
+    let height2 = (bottom.max_y - bottom.min_y) as f32;
+    let avg_height = (height1 + height2) / 2.0;
+
+    if avg_height > 0.0 {
+        let intervals = (vertical_distance / avg_height).round() as usize;
+        if intervals > 0 { intervals } else { 1 }
+    } else {
+        0
     }
-
-    // Find two triangles with different orientations
-    let mut up_triangle: Option<&Triangle> = None;
-    let mut down_triangle: Option<&Triangle> = None;
-
-    for triangle in corners {
-        if triangle.pointing_up && up_triangle.is_none() {
-            up_triangle = Some(triangle);
-        } else if !triangle.pointing_up && down_triangle.is_none() {
-            down_triangle = Some(triangle);
-        }
-
-        if up_triangle.is_some() && down_triangle.is_some() {
-            break;
-        }
-    }
-
-    if let (Some(up), Some(down)) = (up_triangle, down_triangle) {
-        // Calculate vertical distance between the two triangles
-        let vertical_distance = ((up.min_y - down.max_y) as f32).abs();
-
-        // Calculate average triangle height from bounding boxes
-        let height1 = (up.max_y - up.min_y) as f32;
-        let height2 = (down.max_y - down.min_y) as f32;
-        let avg_height = (height1 + height2) / 2.0;
-
-        if avg_height > 0.0 {
-            // Number of rows: the distance includes borders, so we need to adjust
-            // Round the division to get the number of intervals, then add 1 for the row count
-            let intervals = (vertical_distance / avg_height).round() as usize;
-            // But we're measuring center-to-center of filled triangles with borders,
-            // so subtract 1 to account for border overlap
-            return if intervals > 0 { intervals } else { 1 };
-        }
-    }
-
-    0
 }
 
 /// Calculate the number of columns by clustering triangles into rows
 /// and taking the maximum count across rows.
-fn calculate_column_count(triangles: &[Triangle], corners: &[Triangle]) -> usize {
-    if triangles.is_empty() || corners.len() < 2 {
+fn calculate_column_count(triangles: &[Triangle], anchors: &Anchors) -> usize {
+    if triangles.is_empty() {
         return 0;
     }
 
-    // Estimate triangle width (median)
+    // Estimate triangle width (median across all triangles)
     let mut widths: Vec<f32> = triangles
         .iter()
         .map(|t| (t.max_x - t.min_x) as f32)
         .collect();
     widths.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let mid = widths.len() / 2;
-    let median_width = widths[mid].max(1.0);
+    let median_width = widths[widths.len() / 2].max(1.0);
 
-    // Pick two corner triangles from the same row (top row by default)
-    let mut corners_sorted: Vec<&Triangle> = corners.iter().collect();
-    corners_sorted.sort_by(|a, b| {
-        a.center_y
-            .partial_cmp(&b.center_y)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let top_row_y = corners_sorted.first().map(|t| t.center_y).unwrap_or(0.0);
-    let row_threshold = median_width * 0.6;
-
-    let mut top_row: Vec<&Triangle> = corners_sorted
-        .into_iter()
-        .filter(|t| (t.center_y - top_row_y).abs() <= row_threshold)
-        .collect();
-
-    if top_row.len() < 2 {
-        // Fallback: use the two farthest corners by x
-        let mut by_x: Vec<&Triangle> = corners.iter().collect();
-        by_x.sort_by(|a, b| {
-            a.center_x
-                .partial_cmp(&b.center_x)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        top_row = by_x.into_iter().take(2).collect();
-    }
-
-    if top_row.len() < 2 {
-        return 0;
-    }
-
-    top_row.sort_by(|a, b| {
-        a.center_x
-            .partial_cmp(&b.center_x)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let left = top_row.first().unwrap();
-    let right = top_row.last().unwrap();
+    // Use top-left and top-right anchors directly — they are explicitly the correct pair.
+    let left = &anchors.top_left;
+    let right = &anchors.top_right;
 
     // M is the number of triangle widths between corners
     let distance = (right.center_x - left.center_x).abs();
@@ -1270,39 +1211,52 @@ fn calculate_column_count(triangles: &[Triangle], corners: &[Triangle]) -> usize
 
 /// Select triangles from the 4 corners of the image
 /// Only considers black triangles closest to each image corner
-fn select_outermost_triangles(triangles: &[Triangle], count: usize) -> Vec<Triangle> {
+/// The four corner anchor triangles of a tricode grid.
+#[derive(Debug, Clone)]
+pub struct Anchors {
+    pub top_left: Triangle,
+    pub top_right: Triangle,
+    pub bottom_left: Triangle,
+    pub bottom_right: Triangle,
+}
+
+impl Anchors {
+    /// Returns all four anchors as a slice-compatible array for iteration.
+    pub fn all(&self) -> [&Triangle; 4] {
+        [&self.top_left, &self.top_right, &self.bottom_left, &self.bottom_right]
+    }
+}
+
+/// Find the four corner anchor triangles of the grid.
+fn find_anchors(triangles: &[Triangle]) -> Option<Anchors> {
     // Filter for only black triangles
     let black_triangles: Vec<_> = triangles.iter().filter(|t| t.is_black).cloned().collect();
 
     if black_triangles.is_empty() {
-        return Vec::new();
+        return None;
     }
 
     // Get image dimensions from triangles
     let max_x = black_triangles.iter().map(|t| t.max_x).max().unwrap_or(0);
     let max_y = black_triangles.iter().map(|t| t.max_y).max().unwrap_or(0);
 
-    // Define the 4 corners
-    let corners = [
-        (0.0, 0.0),                   // Top-left
-        (max_x as f32, 0.0),          // Top-right
-        (0.0, max_y as f32),          // Bottom-left
-        (max_x as f32, max_y as f32), // Bottom-right
+    // Define the 4 image corners: [top-left, top-right, bottom-left, bottom-right]
+    let image_corners: [(f32, f32); 4] = [
+        (0.0,           0.0          ), // top-left
+        (max_x as f32,  0.0          ), // top-right
+        (0.0,           max_y as f32 ), // bottom-left
+        (max_x as f32,  max_y as f32 ), // bottom-right
     ];
 
-    // For each corner, find the closest triangle
     let mut selected: [Option<Triangle>; 4] = [None, None, None, None];
     let mut min_distances: [f32; 4] = [f32::MAX; 4];
 
-    for triangle in black_triangles {
+    for triangle in &black_triangles {
         let center_x = (triangle.min_x as f32 + triangle.max_x as f32) / 2.0;
         let center_y = (triangle.min_y as f32 + triangle.max_y as f32) / 2.0;
 
-        // Find distance to each corner
-        for (idx, &(corner_x, corner_y)) in corners.iter().enumerate() {
+        for (idx, &(corner_x, corner_y)) in image_corners.iter().enumerate() {
             let dist = (center_x - corner_x).powi(2) + (center_y - corner_y).powi(2);
-
-            // Keep the closest triangle to each corner
             if dist < min_distances[idx] {
                 min_distances[idx] = dist;
                 selected[idx] = Some(triangle.clone());
@@ -1310,12 +1264,11 @@ fn select_outermost_triangles(triangles: &[Triangle], count: usize) -> Vec<Trian
         }
     }
 
-    // Return selected triangles
-    selected
-        .iter()
-        .filter_map(|c| c.clone())
-        .take(count)
-        .collect()
+    let [Some(top_left), Some(top_right), Some(bottom_left), Some(bottom_right)] = selected else {
+        return None;
+    };
+
+    Some(Anchors { top_left, top_right, bottom_left, bottom_right })
 }
 
 /// Sample a small rectangular region around (cx, cy) in a grayscale image.
@@ -1364,45 +1317,16 @@ fn read_bits_from_grid(
     img: &GrayImage,
     row_count: usize,
     column_count: usize,
-    corners: &[Triangle],
+    anchors: &Anchors,
 ) -> (Vec<u8>, usize) {
-    if row_count < 2 || column_count < 2 || corners.len() < 4 {
+    if row_count < 2 || column_count < 2 {
         return (Vec::new(), 0);
     }
 
-    // Identify the four corner triangles by their relative position in the image.
-    // top-left  → minimum (center_x + center_y)
-    // top-right → maximum (center_x − center_y)
-    // bottom-left  → minimum (center_x − center_y)
-    // bottom-right → maximum (center_x + center_y)
-    let find = |f: fn(f32, f32) -> f32| -> Option<&Triangle> {
-        corners.iter().max_by(|a, b| {
-            f(a.center_x, a.center_y)
-                .partial_cmp(&f(b.center_x, b.center_y))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-    };
-
-    let top_left = corners.iter().min_by(|a, b| {
-        (a.center_x + a.center_y)
-            .partial_cmp(&(b.center_x + b.center_y))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let top_right = find(|x, y| x - y);
-    let bottom_left = corners.iter().min_by(|a, b| {
-        (a.center_x - a.center_y)
-            .partial_cmp(&(b.center_x - b.center_y))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let (Some(tl), Some(tr), Some(bl)) = (top_left, top_right, bottom_left) else {
-        return (Vec::new(), 0);
-    };
-
-    // Convert pixel centroids → bounding-box cell centers
-    let (tl_cx, tl_cy) = centroid_to_bbox_center(tl);
-    let (tr_cx, _tr_cy) = centroid_to_bbox_center(tr);
-    let (_bl_cx, bl_cy) = centroid_to_bbox_center(bl);
+    // Convert pixel centroids → bounding-box cell centers using the named anchor fields.
+    let (tl_cx, tl_cy) = centroid_to_bbox_center(&anchors.top_left);
+    let (tr_cx, _tr_cy) = centroid_to_bbox_center(&anchors.top_right);
+    let (_bl_cx, bl_cy) = centroid_to_bbox_center(&anchors.bottom_left);
 
     let cols_f = (column_count - 1) as f32;
     let rows_f = (row_count - 1) as f32;
@@ -1456,11 +1380,11 @@ fn read_bits_from_grid(
 }
 
 /// Draw red rectangles on the image based on triangle bounding boxes
-fn draw_rectangles(img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>, triangles: &[Triangle]) {
+fn draw_rectangles(img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>, anchors: &Anchors) {
     let red = Rgba([255, 0, 0, 255]);
     let border_width = 5;
 
-    for triangle in triangles {
+    for triangle in anchors.all() {
         // Draw rectangle borders
         let min_x = triangle.min_x.min(img.width().saturating_sub(1));
         let min_y = triangle.min_y.min(img.height().saturating_sub(1));
