@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:rinf/rinf.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'src/bindings/bindings.dart';
 
@@ -76,9 +77,11 @@ class _MyHomePageState extends State<MyHomePage>
   int _selectedStyle = 0; // 0 = Tiles, 1 = Stain
   bool? _decodeSuccess;
   String? _decodeText;
+  String _decodeContentType = '';
   DecodeResult? _decodeDebug;
   GeneratedImage? _generateDebug;
   bool _showDebugInfo = false;
+  String _selectedPayloadType = 'text';
 
   bool get _shouldShowZoomControls {
     if (_imageWidth == null || _imageHeight == null) return false;
@@ -99,6 +102,7 @@ class _MyHomePageState extends State<MyHomePage>
         setState(() {
           _decodeSuccess = null;
           _decodeText = null;
+          _decodeContentType = '';
           _decodeDebug = null;
           _isDecoding = false;
         });
@@ -174,6 +178,7 @@ class _MyHomePageState extends State<MyHomePage>
         _isDecoding = false;
         _decodeSuccess = msg.success;
         _decodeText = msg.success ? msg.text : null;
+        _decodeContentType = msg.success ? msg.contentType : '';
         _decodeDebug = msg;
       });
     });
@@ -197,6 +202,7 @@ class _MyHomePageState extends State<MyHomePage>
       widthRatio: safeWidth,
       heightRatio: safeHeight,
       style: _selectedStyle,
+      payloadType: _selectedPayloadType,
     ).sendSignalToRust();
   }
 
@@ -400,18 +406,45 @@ class _MyHomePageState extends State<MyHomePage>
                           ),
                         ),
                         const SizedBox(height: 8),
-                        Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(16.0),
-                          decoration: BoxDecoration(
-                            border: Border.all(color: Colors.green),
-                            borderRadius: BorderRadius.circular(8),
+                        if (_decodeContentType == 'url') ...[
+                          GestureDetector(
+                            onTap: () async {
+                              final uri = Uri.tryParse(_decodeText!);
+                              if (uri != null && await canLaunchUrl(uri)) {
+                                await launchUrl(uri, mode: LaunchMode.externalApplication);
+                              }
+                            },
+                            child: Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.all(16.0),
+                              decoration: BoxDecoration(
+                                border: Border.all(color: Colors.green),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                _decodeText!,
+                                style: const TextStyle(
+                                  fontSize: 14,
+                                  color: Colors.blue,
+                                  decoration: TextDecoration.underline,
+                                ),
+                              ),
+                            ),
                           ),
-                          child: SelectableText(
-                            _decodeText!,
-                            style: const TextStyle(fontSize: 14),
+                        ] else ...[
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.all(16.0),
+                            decoration: BoxDecoration(
+                              border: Border.all(color: Colors.green),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: SelectableText(
+                              _decodeText!,
+                              style: const TextStyle(fontSize: 14),
+                            ),
                           ),
-                        ),
+                        ],
                       ] else if (_decodeSuccess == false) ...[
                         const Text(
                           'Decoding failed',
@@ -534,6 +567,19 @@ class _MyHomePageState extends State<MyHomePage>
                           ),
                         ],
                       ),
+                    ),
+                    const SizedBox(height: 16),
+                    SegmentedButton<String>(
+                      segments: const [
+                        ButtonSegment(value: 'text', label: Text('Text')),
+                        ButtonSegment(value: 'url', label: Text('URL')),
+                      ],
+                      selected: {_selectedPayloadType},
+                      onSelectionChanged: (selection) {
+                        setState(() {
+                          _selectedPayloadType = selection.first;
+                        });
+                      },
                     ),
                     const SizedBox(height: 16),
                     SegmentedButton<int>(

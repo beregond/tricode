@@ -9,6 +9,8 @@ pub struct SmallText {
     pub height_ratio: u32,
     /// 0 = Tiles, 1 = Stain
     pub style: u32,
+    /// "text" or "url"
+    pub payload_type: String,
 }
 
 /// Image bytes to be decoded.
@@ -24,6 +26,8 @@ pub struct DecodeResult {
     pub success: bool,
     pub text: String,
     pub error: String,
+    /// "text" or "url" — extracted from the msgpack envelope on success, empty on failure
+    pub content_type: String,
     // debug info (only meaningful in debug builds / when kDebugMode is true in Dart)
     pub image_width: u32,
     pub image_height: u32,

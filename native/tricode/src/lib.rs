@@ -4,28 +4,31 @@ use imageproc::contrast::{threshold, ThresholdType};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use serde::{Deserialize, Serialize};
 
-/// Pack a text payload into msgpack: `{"type": "text", "value": "<payload>"}`.
-fn pack_payload(text: &str) -> Result<Vec<u8>, String> {
+/// Pack a text payload into msgpack: `{"type": "<kind>", "value": "<payload>"}`.
+pub fn pack_payload(kind: &str, text: &str) -> Result<Vec<u8>, String> {
     #[derive(Serialize)]
     struct Envelope<'a> {
         #[serde(rename = "type")]
         kind: &'a str,
         value: &'a str,
     }
-    let envelope = Envelope { kind: "text", value: text };
+    let envelope = Envelope { kind, value: text };
     rmp_serde::to_vec_named(&envelope)
         .map_err(|e| format!("msgpack encode error: {}", e))
 }
 
-/// Unpack a msgpack blob produced by [`pack_payload`] and return the `value` string.
-fn unpack_payload(bytes: &[u8]) -> Result<String, String> {
+/// Unpack a msgpack blob produced by [`pack_payload`].
+/// Returns `(kind, value)` where `kind` is e.g. `"text"` or `"url"`.
+pub fn unpack_payload(bytes: &[u8]) -> Result<(String, String), String> {
     #[derive(Deserialize)]
     struct Envelope {
+        #[serde(rename = "type")]
+        kind: String,
         value: String,
     }
     let envelope: Envelope = rmp_serde::from_slice(bytes)
         .map_err(|e| format!("msgpack decode error: {}", e))?;
-    Ok(envelope.value)
+    Ok((envelope.kind, envelope.value))
 }
 
 
@@ -112,8 +115,8 @@ pub struct GenerateDebug {
 /// Generates a PNG image encoding the payload text.
 /// The payload is first encoded with Reed-Solomon error correction,
 /// then the binary data is visualized as pixels: 0 bits = white, 1 bits = black.
-pub fn generate_image(payload: &str, width_ratio: u32, height_ratio: u32) -> Vec<u8> {
-    let payload_bytes = match pack_payload(payload) {
+pub fn generate_image(payload: &str, payload_type: &str, width_ratio: u32, height_ratio: u32) -> Vec<u8> {
+    let payload_bytes = match pack_payload(payload_type, payload) {
         Ok(b) => b,
         Err(_) => return Vec::new(),
     };
@@ -126,8 +129,8 @@ pub fn generate_image(payload: &str, width_ratio: u32, height_ratio: u32) -> Vec
 }
 
 /// Generates a PNG image encoding the payload text, returning full debug info.
-pub fn generate_image_debug(payload: &str, width_ratio: u32, height_ratio: u32, style: ImageStyle) -> Option<GenerateDebug> {
-    let payload_bytes = match pack_payload(payload) {
+pub fn generate_image_debug(payload: &str, payload_type: &str, width_ratio: u32, height_ratio: u32, style: ImageStyle) -> Option<GenerateDebug> {
+    let payload_bytes = match pack_payload(payload_type, payload) {
         Ok(b) => b,
         Err(_) => return None,
     };
@@ -578,6 +581,7 @@ pub fn reed_solomon_decode(encoded_data: Vec<u8>) -> Result<Vec<u8>, String> {
 #[derive(Debug, Clone)]
 pub struct DecodeDebug {
     pub text: Option<String>,  // Some on success, None on decode failure
+    pub content_type: String,  // "text", "url", or empty on failure
     pub error: Option<String>, // Some on failure, None on success
     pub image_width: u32,
     pub image_height: u32,
@@ -610,6 +614,18 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
     // Select 4 corner triangles
     let outermost = select_outermost_triangles(&triangles, 4);
 
+    eprintln!("DEBUG outermost triangles ({} found):", outermost.len());
+    for (i, t) in outermost.iter().enumerate() {
+        eprintln!(
+            "  [{}] center=({:.1}, {:.1})  bbox=({}, {})–({}, {})  pointing_{}  area={:.0}",
+            i,
+            t.center_x, t.center_y,
+            t.min_x, t.min_y, t.max_x, t.max_y,
+            if t.pointing_up { "up" } else { "down" },
+            t.area,
+        );
+    }
+
     // Count rows and columns — naive method first, new methods as fallback.
     let row_naive = calculate_row_count(&outermost);
     let col_naive = calculate_column_count(&triangles, &outermost);
@@ -630,7 +646,7 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
         .map_err(|e| format!("Failed to encode annotated image: {}", e))?;
 
     // Helper: attempt a full decode with the given row/col counts.
-    let try_decode = |rows: usize, cols: usize| -> Result<String, String> {
+    let try_decode = |rows: usize, cols: usize| -> Result<(String, String), String> {
         let (bits, _) = read_bits_from_grid(&gray_img, rows, cols, &outermost);
         let decoded_bytes = reed_solomon_decode(bits)?;
         unpack_payload(&decoded_bytes)
@@ -639,9 +655,10 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
     // --- Attempt 1: naive row/col values ---
     eprintln!("DEBUG attempt 1: rows={} cols={}", row_naive, col_naive);
     match try_decode(row_naive, col_naive) {
-        Ok(text) => {
+        Ok((kind, text)) => {
             return Ok(DecodeDebug {
                 text: Some(text),
+                content_type: kind,
                 error: None,
                 image_width: gray_img.width(),
                 image_height: gray_img.height(),
@@ -675,6 +692,7 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
 
             let debug = DecodeDebug {
                 text: None,
+                content_type: String::new(),
                 error: None,
                 image_width: gray_img.width(),
                 image_height: gray_img.height(),
@@ -689,9 +707,10 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
             // Attempt 2 result — succeed immediately, or fall through to attempt 3.
             let _e2_msg = match reed_solomon_decode(bits2) {
                 Ok(decoded_bytes) => match unpack_payload(&decoded_bytes) {
-                    Ok(text) => {
+                    Ok((kind, text)) => {
                         return Ok(DecodeDebug {
                             text: Some(text),
+                            content_type: kind,
                             decode_method: "cluster+pitch".to_string(),
                             ..debug
                         })
@@ -724,10 +743,11 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
                 }
                 let (bits3, bit_count3) = read_bits_from_grid(&gray_img, r, c, &outermost);
                 if let Ok(decoded) = reed_solomon_decode(bits3) {
-                    if let Ok(text) = unpack_payload(&decoded) {
+                    if let Ok((kind, text)) = unpack_payload(&decoded) {
                         eprintln!("DEBUG attempt 3 succeeded: rows={} cols={}", r, c);
                         return Ok(DecodeDebug {
                             text: Some(text),
+                            content_type: kind,
                             row_count: r,
                             column_count: c,
                             bit_count: bit_count3,
@@ -1235,6 +1255,12 @@ fn calculate_column_count(triangles: &[Triangle], corners: &[Triangle]) -> usize
     // M is the number of triangle widths between corners
     let distance = (right.center_x - left.center_x).abs();
     let m = (distance / median_width).round() as usize;
+
+    eprintln!(
+        "DEBUG col_count: left_cx={:.1} right_cx={:.1} distance={:.1} median_width={:.1} m={} => cols={}",
+        left.center_x, right.center_x, distance, median_width, m,
+        if m < 2 { 0 } else { 2 * (m - 2) + 1 }
+    );
 
     if m < 2 {
         return 0;
