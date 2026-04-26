@@ -4,7 +4,31 @@ use imageproc::contrast::{threshold, ThresholdType};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use serde::{Deserialize, Serialize};
 
-/// Visual style for image generation.
+/// Pack a text payload into msgpack: `{"type": "text", "value": "<payload>"}`.
+fn pack_payload(text: &str) -> Result<Vec<u8>, String> {
+    #[derive(Serialize)]
+    struct Envelope<'a> {
+        #[serde(rename = "type")]
+        kind: &'a str,
+        value: &'a str,
+    }
+    let envelope = Envelope { kind: "text", value: text };
+    rmp_serde::to_vec_named(&envelope)
+        .map_err(|e| format!("msgpack encode error: {}", e))
+}
+
+/// Unpack a msgpack blob produced by [`pack_payload`] and return the `value` string.
+fn unpack_payload(bytes: &[u8]) -> Result<String, String> {
+    #[derive(Deserialize)]
+    struct Envelope {
+        value: String,
+    }
+    let envelope: Envelope = rmp_serde::from_slice(bytes)
+        .map_err(|e| format!("msgpack decode error: {}", e))?;
+    Ok(envelope.value)
+}
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageStyle {
     /// Black triangles with a 1-pixel gap (border excluded) between neighbours.
@@ -89,7 +113,10 @@ pub struct GenerateDebug {
 /// The payload is first encoded with Reed-Solomon error correction,
 /// then the binary data is visualized as pixels: 0 bits = white, 1 bits = black.
 pub fn generate_image(payload: &str, width_ratio: u32, height_ratio: u32) -> Vec<u8> {
-    let payload_bytes = payload.as_bytes().to_vec();
+    let payload_bytes = match pack_payload(payload) {
+        Ok(b) => b,
+        Err(_) => return Vec::new(),
+    };
     let encoded_data = match reed_solomon_encode(payload_bytes) {
         Ok(data) => data,
         Err(_) => return Vec::new(),
@@ -100,7 +127,10 @@ pub fn generate_image(payload: &str, width_ratio: u32, height_ratio: u32) -> Vec
 
 /// Generates a PNG image encoding the payload text, returning full debug info.
 pub fn generate_image_debug(payload: &str, width_ratio: u32, height_ratio: u32, style: ImageStyle) -> Option<GenerateDebug> {
-    let payload_bytes = payload.as_bytes().to_vec();
+    let payload_bytes = match pack_payload(payload) {
+        Ok(b) => b,
+        Err(_) => return None,
+    };
     let encoded_data = match reed_solomon_encode(payload_bytes) {
         Ok(data) => data,
         Err(_) => return None,
@@ -603,8 +633,7 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
     let try_decode = |rows: usize, cols: usize| -> Result<String, String> {
         let (bits, _) = read_bits_from_grid(&gray_img, rows, cols, &outermost);
         let decoded_bytes = reed_solomon_decode(bits)?;
-        String::from_utf8(decoded_bytes)
-            .map_err(|e| format!("Decoded data is not valid UTF-8: {}", e))
+        unpack_payload(&decoded_bytes)
     };
 
     // --- Attempt 1: naive row/col values ---
@@ -659,7 +688,7 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
 
             // Attempt 2 result — succeed immediately, or fall through to attempt 3.
             let _e2_msg = match reed_solomon_decode(bits2) {
-                Ok(decoded_bytes) => match String::from_utf8(decoded_bytes) {
+                Ok(decoded_bytes) => match unpack_payload(&decoded_bytes) {
                     Ok(text) => {
                         return Ok(DecodeDebug {
                             text: Some(text),
@@ -695,7 +724,7 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
                 }
                 let (bits3, bit_count3) = read_bits_from_grid(&gray_img, r, c, &outermost);
                 if let Ok(decoded) = reed_solomon_decode(bits3) {
-                    if let Ok(text) = String::from_utf8(decoded) {
+                    if let Ok(text) = unpack_payload(&decoded) {
                         eprintln!("DEBUG attempt 3 succeeded: rows={} cols={}", r, c);
                         return Ok(DecodeDebug {
                             text: Some(text),
