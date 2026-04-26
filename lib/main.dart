@@ -318,8 +318,10 @@ class _MyHomePageState extends State<MyHomePage>
           backgroundColor: Theme.of(context).colorScheme.inversePrimary,
           title: const Text('Tricode'),
           actions: [
-            IconButton(
-              icon: const Icon(Icons.settings),
+            Padding(
+              padding: EdgeInsets.only(right: kDebugMode ? 48.0 : 0.0),
+              child: IconButton(
+                icon: const Icon(Icons.settings),
               tooltip: 'Settings',
               onPressed: () {
                 showDialog<void>(
@@ -345,6 +347,7 @@ class _MyHomePageState extends State<MyHomePage>
                   ),
                 );
               },
+              ),
             ),
           ],
           bottom: TabBar(
@@ -475,10 +478,9 @@ class _MyHomePageState extends State<MyHomePage>
                 ),
               ),
             ),
-            Center(
-              child: SingleChildScrollView(
+            SingleChildScrollView(
                 child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisAlignment: MainAxisAlignment.start,
                   children: [
                     Padding(
                       padding: const EdgeInsets.all(16.0),
@@ -678,7 +680,6 @@ class _MyHomePageState extends State<MyHomePage>
                     ],
                   ],
                 ),
-              ),
             ),
           ],
         ),
