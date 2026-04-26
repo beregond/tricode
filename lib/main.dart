@@ -538,17 +538,17 @@ class _MyHomePageState extends State<MyHomePage>
                       segments: const [
                         ButtonSegment(value: 0, label: Text('Tiles')),
                         ButtonSegment(value: 1, label: Text('Stain')),
+                        ButtonSegment(value: 2, label: Text('Horizon')),
                       ],
                       selected: {_selectedStyle},
-                      onSelectionChanged: (selection) => setState(() {
-                        _selectedStyle = selection.first;
-                        if (_latestImage != null) {
-                          _latestImage = null;
-                          _imageWidth = null;
-                          _imageHeight = null;
-                          _generateDebug = null;
+                      onSelectionChanged: (selection) {
+                        setState(() {
+                          _selectedStyle = selection.first;
+                        });
+                        if (_textController.text.trim().isNotEmpty) {
+                          _sendTextToRust();
                         }
-                      }),
+                      },
                     ),
                     const SizedBox(height: 16),
                     ElevatedButton(

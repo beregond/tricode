@@ -11,14 +11,66 @@ pub enum ImageStyle {
     Tiles,
     /// Black triangles filled edge-to-edge with no gap.
     Stain,
+    /// Each triangle independently drawn with or without border, determined by
+    /// a pre-computed [`HorizonLayout`].
+    Horizon,
 }
 
 impl ImageStyle {
     pub fn from_u32(v: u32) -> Self {
         match v {
             1 => Self::Stain,
+            2 => Self::Horizon,
             _ => Self::Tiles,
         }
+    }
+}
+
+/// Per-triangle border decision for the [`ImageStyle::Horizon`] style.
+///
+/// `has_border[square_y][square_x]` is `true` when that triangle should be
+/// drawn *without* a border gap (i.e. filled edge-to-edge like `Stain`) and
+/// `false` when it should keep the 1-pixel gap (like `Tiles`).
+///
+/// Having a dedicated struct here gives us a single place to swap the
+/// generation algorithm later (e.g. noise, rules, etc.) without touching the
+/// renderer.
+#[derive(Debug, Clone)]
+pub struct HorizonLayout {
+    /// `rows × cols` boolean grid; `true` = draw border (Stain-like).
+    pub has_border: Vec<Vec<bool>>,
+}
+
+impl HorizonLayout {
+    /// Generate a random layout for a grid of `rows` × `cols` triangles.
+    pub fn generate_random(rows: u32, cols: u32) -> Self {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        use std::time::SystemTime;
+
+        // Simple deterministic-ish seed from wall-clock time so each call
+        // produces a different layout without pulling in an external crate.
+        let seed = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(42);
+
+        let mut hasher = DefaultHasher::new();
+        seed.hash(&mut hasher);
+
+        let mut has_border = Vec::with_capacity(rows as usize);
+        for row in 0..rows {
+            let mut row_vec = Vec::with_capacity(cols as usize);
+            for col in 0..cols {
+                row.hash(&mut hasher);
+                col.hash(&mut hasher);
+                // Use the low bit of the hash as a coin flip.
+                row_vec.push(hasher.finish() & 1 == 0);
+            }
+            has_border.push(row_vec);
+        }
+
+        Self { has_border }
     }
 }
 
@@ -66,6 +118,16 @@ fn create_image_from_binary_data(
     height_ratio: u32,
     style: ImageStyle,
 ) -> GenerateDebug {
+    // Pre-compute the Horizon layout so the algorithm lives in one place and
+    // the renderer below just queries it.
+    // For non-Horizon styles this is a zero-cost no-op (empty vecs).
+    let horizon_layout: Option<HorizonLayout> = if style == ImageStyle::Horizon {
+        // We don't know the grid dimensions yet; we'll build the layout after
+        // `find_optimal_factors`. Define a small closure to defer construction.
+        None // placeholder — replaced below after grid size is known
+    } else {
+        None
+    };
     const PIXELS_PER_BIT_WIDTH: u32 = 51; // Bit box width in pixels
     let pixels_per_bit_height =
         ((PIXELS_PER_BIT_WIDTH as f64) * (3.0_f64.sqrt() / 2.0)).ceil() as u32;
@@ -81,6 +143,13 @@ fn create_image_from_binary_data(
     // Find optimal integer dimensions using the previously written function
     let (width_squares, height_squares) =
         find_optimal_factors(total_bits as u32, normalized_width, normalized_height);
+
+    // Now that we know the grid size, build the Horizon layout if needed.
+    let horizon_layout: Option<HorizonLayout> = if style == ImageStyle::Horizon {
+        Some(HorizonLayout::generate_random(height_squares, width_squares))
+    } else {
+        horizon_layout // None for Tiles / Stain
+    };
 
     // Calculate padding
     let padding_x = PIXELS_PER_BIT_WIDTH / 2;
@@ -166,24 +235,38 @@ fn create_image_from_binary_data(
 
                             // Check if this pixel is on a border
                             // TODO: maybe simpler?
+                            //
+                            // For Horizon, non-bordered triangles use a 3× thicker gap
+                            // so the style reads as visually distinct from plain Tiles.
+                            let border_thickness: f64 = match style {
+                                ImageStyle::Horizon => {
+                                    let tri_has_border = horizon_layout
+                                        .as_ref()
+                                        .and_then(|l| l.has_border.get(square_y as usize))
+                                        .and_then(|row| row.get(square_x as usize))
+                                        .copied()
+                                        .unwrap_or(false);
+                                    if tri_has_border { 0.0 } else { 3.0 }
+                                }
+                                ImageStyle::Tiles => 1.0,
+                                ImageStyle::Stain => 0.0,
+                            };
+
                             let is_base = if pointing_down {
-                                dy == 0
+                                dy < border_thickness as u32
                             } else {
-                                dy == pixels_per_bit_height - 1
+                                dy >= pixels_per_bit_height - border_thickness as u32
                             };
                             let is_tip = if pointing_down {
-                                dy == pixels_per_bit_height - 1
+                                dy >= pixels_per_bit_height - border_thickness as u32
                             } else {
-                                dy == 0
+                                dy < border_thickness as u32
                             };
-                            let is_left_edge = (x - center_x).abs() >= half_width - 0.5;
-                            let is_right_edge = (x - center_x).abs() >= half_width - 1.5;
+                            let is_left_edge = (x - center_x).abs() >= half_width - (border_thickness * 0.5);
+                            let is_right_edge = (x - center_x).abs() >= half_width - (border_thickness * 1.5);
 
                             let is_border = is_base || is_tip || is_left_edge || is_right_edge;
-                            let draw = match style {
-                                ImageStyle::Tiles => !is_border,
-                                ImageStyle::Stain => true,
-                            };
+                            let draw = border_thickness == 0.0 || !is_border;
                             if draw {
                                 img.put_pixel(px, py, rgba);
                             }
