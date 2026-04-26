@@ -1,6 +1,6 @@
 use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, GrayImage, ImageBuffer, ImageEncoder, Rgba};
-use imageproc::contrast::{threshold, ThresholdType};
+use imageproc::contrast::{ThresholdType, threshold};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use serde::{Deserialize, Serialize};
 
@@ -13,8 +13,7 @@ pub fn pack_payload(kind: &str, text: &str) -> Result<Vec<u8>, String> {
         value: &'a str,
     }
     let envelope = Envelope { kind, value: text };
-    rmp_serde::to_vec_named(&envelope)
-        .map_err(|e| format!("msgpack encode error: {}", e))
+    rmp_serde::to_vec_named(&envelope).map_err(|e| format!("msgpack encode error: {}", e))
 }
 
 /// Unpack a msgpack blob produced by [`pack_payload`].
@@ -26,11 +25,14 @@ pub fn unpack_payload(bytes: &[u8]) -> Result<(String, String), String> {
         kind: String,
         value: String,
     }
-    let envelope: Envelope = rmp_serde::from_slice(bytes)
+    // `to_vec_named` writes a msgpack map with string keys; we must deserialise
+    // in the same named/map mode — rmp_serde's default `from_slice` uses the
+    // compact array format which is incompatible with named maps.
+    let mut de = rmp_serde::Deserializer::new(bytes);
+    let envelope = Envelope::deserialize(&mut de)
         .map_err(|e| format!("msgpack decode error: {}", e))?;
     Ok((envelope.kind, envelope.value))
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageStyle {
@@ -105,7 +107,7 @@ impl HorizonLayout {
 #[derive(Debug, Clone)]
 pub struct GenerateDebug {
     pub png_bytes: Vec<u8>,
-    pub encoded_bytes: usize,  // bytes after Reed-Solomon encoding
+    pub encoded_bytes: usize, // bytes after Reed-Solomon encoding
     pub grid_rows: u32,
     pub grid_columns: u32,
     pub data_bits_used: usize, // bits actually written from encoded_data
@@ -115,7 +117,12 @@ pub struct GenerateDebug {
 /// Generates a PNG image encoding the payload text.
 /// The payload is first encoded with Reed-Solomon error correction,
 /// then the binary data is visualized as pixels: 0 bits = white, 1 bits = black.
-pub fn generate_image(payload: &str, payload_type: &str, width_ratio: u32, height_ratio: u32) -> Vec<u8> {
+pub fn generate_image(
+    payload: &str,
+    payload_type: &str,
+    width_ratio: u32,
+    height_ratio: u32,
+) -> Vec<u8> {
     let payload_bytes = match pack_payload(payload_type, payload) {
         Ok(b) => b,
         Err(_) => return Vec::new(),
@@ -125,11 +132,18 @@ pub fn generate_image(payload: &str, payload_type: &str, width_ratio: u32, heigh
         Err(_) => return Vec::new(),
     };
 
-    create_image_from_binary_data(&encoded_data, width_ratio, height_ratio, ImageStyle::Tiles).png_bytes
+    create_image_from_binary_data(&encoded_data, width_ratio, height_ratio, ImageStyle::Tiles)
+        .png_bytes
 }
 
 /// Generates a PNG image encoding the payload text, returning full debug info.
-pub fn generate_image_debug(payload: &str, payload_type: &str, width_ratio: u32, height_ratio: u32, style: ImageStyle) -> Option<GenerateDebug> {
+pub fn generate_image_debug(
+    payload: &str,
+    payload_type: &str,
+    width_ratio: u32,
+    height_ratio: u32,
+    style: ImageStyle,
+) -> Option<GenerateDebug> {
     let payload_bytes = match pack_payload(payload_type, payload) {
         Ok(b) => b,
         Err(_) => return None,
@@ -139,7 +153,12 @@ pub fn generate_image_debug(payload: &str, payload_type: &str, width_ratio: u32,
         Err(_) => return None,
     };
 
-    Some(create_image_from_binary_data(&encoded_data, width_ratio, height_ratio, style))
+    Some(create_image_from_binary_data(
+        &encoded_data,
+        width_ratio,
+        height_ratio,
+        style,
+    ))
 }
 
 /// Creates a PNG image from binary data maintaining the specified aspect ratio.
@@ -179,7 +198,10 @@ fn create_image_from_binary_data(
 
     // Now that we know the grid size, build the Horizon layout if needed.
     let horizon_layout: Option<HorizonLayout> = if style == ImageStyle::Horizon {
-        Some(HorizonLayout::generate_random(height_squares, width_squares))
+        Some(HorizonLayout::generate_random(
+            height_squares,
+            width_squares,
+        ))
     } else {
         horizon_layout // None for Tiles / Stain
     };
@@ -295,8 +317,10 @@ fn create_image_from_binary_data(
                             } else {
                                 dy < border_thickness as u32
                             };
-                            let is_left_edge = (x - center_x).abs() >= half_width - (border_thickness * 0.5);
-                            let is_right_edge = (x - center_x).abs() >= half_width - (border_thickness * 1.5);
+                            let is_left_edge =
+                                (x - center_x).abs() >= half_width - (border_thickness * 0.5);
+                            let is_right_edge =
+                                (x - center_x).abs() >= half_width - (border_thickness * 1.5);
 
                             let is_border = is_base || is_tip || is_left_edge || is_right_edge;
                             let draw = border_thickness == 0.0 || !is_border;
@@ -615,26 +639,66 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
     let anchors = find_anchors(&triangles).ok_or("Could not find anchor triangles")?;
 
     eprintln!("DEBUG anchors:");
-    eprintln!("  top_left:     center=({:.1}, {:.1})  bbox=({}, {})–({}, {})  pointing_{}",
-        anchors.top_left.center_x, anchors.top_left.center_y,
-        anchors.top_left.min_x, anchors.top_left.min_y, anchors.top_left.max_x, anchors.top_left.max_y,
-        if anchors.top_left.pointing_up { "up" } else { "down" });
-    eprintln!("  top_right:    center=({:.1}, {:.1})  bbox=({}, {})–({}, {})  pointing_{}",
-        anchors.top_right.center_x, anchors.top_right.center_y,
-        anchors.top_right.min_x, anchors.top_right.min_y, anchors.top_right.max_x, anchors.top_right.max_y,
-        if anchors.top_right.pointing_up { "up" } else { "down" });
-    eprintln!("  bottom_left:  center=({:.1}, {:.1})  bbox=({}, {})–({}, {})  pointing_{}",
-        anchors.bottom_left.center_x, anchors.bottom_left.center_y,
-        anchors.bottom_left.min_x, anchors.bottom_left.min_y, anchors.bottom_left.max_x, anchors.bottom_left.max_y,
-        if anchors.bottom_left.pointing_up { "up" } else { "down" });
-    eprintln!("  bottom_right: center=({:.1}, {:.1})  bbox=({}, {})–({}, {})  pointing_{}",
-        anchors.bottom_right.center_x, anchors.bottom_right.center_y,
-        anchors.bottom_right.min_x, anchors.bottom_right.min_y, anchors.bottom_right.max_x, anchors.bottom_right.max_y,
-        if anchors.bottom_right.pointing_up { "up" } else { "down" });
+    eprintln!(
+        "  top_left:     center=({:.1}, {:.1})  bbox=({}, {})–({}, {})  pointing_{}",
+        anchors.top_left.center_x,
+        anchors.top_left.center_y,
+        anchors.top_left.min_x,
+        anchors.top_left.min_y,
+        anchors.top_left.max_x,
+        anchors.top_left.max_y,
+        if anchors.top_left.pointing_up {
+            "up"
+        } else {
+            "down"
+        }
+    );
+    eprintln!(
+        "  top_right:    center=({:.1}, {:.1})  bbox=({}, {})–({}, {})  pointing_{}",
+        anchors.top_right.center_x,
+        anchors.top_right.center_y,
+        anchors.top_right.min_x,
+        anchors.top_right.min_y,
+        anchors.top_right.max_x,
+        anchors.top_right.max_y,
+        if anchors.top_right.pointing_up {
+            "up"
+        } else {
+            "down"
+        }
+    );
+    eprintln!(
+        "  bottom_left:  center=({:.1}, {:.1})  bbox=({}, {})–({}, {})  pointing_{}",
+        anchors.bottom_left.center_x,
+        anchors.bottom_left.center_y,
+        anchors.bottom_left.min_x,
+        anchors.bottom_left.min_y,
+        anchors.bottom_left.max_x,
+        anchors.bottom_left.max_y,
+        if anchors.bottom_left.pointing_up {
+            "up"
+        } else {
+            "down"
+        }
+    );
+    eprintln!(
+        "  bottom_right: center=({:.1}, {:.1})  bbox=({}, {})–({}, {})  pointing_{}",
+        anchors.bottom_right.center_x,
+        anchors.bottom_right.center_y,
+        anchors.bottom_right.min_x,
+        anchors.bottom_right.min_y,
+        anchors.bottom_right.max_x,
+        anchors.bottom_right.max_y,
+        if anchors.bottom_right.pointing_up {
+            "up"
+        } else {
+            "down"
+        }
+    );
 
     // Count rows and columns — naive method first, new methods as fallback.
     let row_naive = calculate_row_count(&anchors);
-    let col_naive = calculate_column_count(&triangles, &anchors);
+    let col_naive = calculate_column_count(&anchors);
 
     // Draw rectangles on the annotated image
     let mut annotated_img = img.clone();
@@ -717,7 +781,7 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
                             content_type: kind,
                             decode_method: "cluster+pitch".to_string(),
                             ..debug
-                        })
+                        });
                     }
                     Err(e) => format!("decoded data is not valid UTF-8: {}", e),
                 },
@@ -726,17 +790,14 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
 
             // --- Attempt 3: try all ±1 permutations of (row_adj, col_adj) ---
             let offsets: &[(isize, isize)] = &[
-                (-1, -1),
-                (-1, 0),
-                (-1, 1),
-                (0, -1),
-                (0, 1),
-                (1, -1),
-                (1, 0),
-                (1, 1),
+                (-2, -2), (-2, -1), (-2, 0), (-2, 1), (-2, 2),
+                (-1, -2), (-1, -1), (-1, 0), (-1, 1), (-1, 2),
+                ( 0, -2), ( 0, -1),          ( 0, 1), ( 0, 2),
+                ( 1, -2), ( 1, -1), ( 1, 0), ( 1, 1), ( 1, 2),
+                ( 2, -2), ( 2, -1), ( 2, 0), ( 2, 1), ( 2, 2),
             ];
             eprintln!(
-                "DEBUG attempt 3: trying ±1 permutations of rows={} cols={}",
+                "DEBUG attempt 3: trying ±2 permutations of rows={} cols={}",
                 row_adj, col_adj
             );
             for &(dr, dc) in offsets {
@@ -1149,7 +1210,10 @@ fn count_columns_by_pitch(triangles: &[Triangle], anchors: &Anchors) -> (usize, 
 
     // Derive column count from the top anchor horizontal span.
     let min_cx = anchors.top_left.center_x.min(anchors.bottom_left.center_x);
-    let max_cx = anchors.top_right.center_x.max(anchors.bottom_right.center_x);
+    let max_cx = anchors
+        .top_right
+        .center_x
+        .max(anchors.bottom_right.center_x);
     let span = (max_cx - min_cx).abs();
     let col_count = (span / pitch).round() as usize + 1;
 
@@ -1176,13 +1240,8 @@ fn calculate_row_count(anchors: &Anchors) -> usize {
 
 /// Calculate the number of columns by clustering triangles into rows
 /// and taking the maximum count across rows.
-fn calculate_column_count(triangles: &[Triangle], anchors: &Anchors) -> usize {
-    if triangles.is_empty() {
-        return 0;
-    }
-
-    // Estimate triangle width (median across all triangles)
-    let mut widths: Vec<f32> = triangles
+fn calculate_column_count(anchors: &Anchors) -> usize {    // Estimate triangle width from anchors only
+    let mut widths: Vec<f32> = anchors.all()
         .iter()
         .map(|t| (t.max_x - t.min_x) as f32)
         .collect();
@@ -1199,7 +1258,11 @@ fn calculate_column_count(triangles: &[Triangle], anchors: &Anchors) -> usize {
 
     eprintln!(
         "DEBUG col_count: left_cx={:.1} right_cx={:.1} distance={:.1} median_width={:.1} m={} => cols={}",
-        left.center_x, right.center_x, distance, median_width, m,
+        left.center_x,
+        right.center_x,
+        distance,
+        median_width,
+        m,
         if m < 2 { 0 } else { 2 * (m - 2) + 1 }
     );
 
@@ -1223,7 +1286,12 @@ pub struct Anchors {
 impl Anchors {
     /// Returns all four anchors as a slice-compatible array for iteration.
     pub fn all(&self) -> [&Triangle; 4] {
-        [&self.top_left, &self.top_right, &self.bottom_left, &self.bottom_right]
+        [
+            &self.top_left,
+            &self.top_right,
+            &self.bottom_left,
+            &self.bottom_right,
+        ]
     }
 }
 
@@ -1242,10 +1310,10 @@ fn find_anchors(triangles: &[Triangle]) -> Option<Anchors> {
 
     // Define the 4 image corners: [top-left, top-right, bottom-left, bottom-right]
     let image_corners: [(f32, f32); 4] = [
-        (0.0,           0.0          ), // top-left
-        (max_x as f32,  0.0          ), // top-right
-        (0.0,           max_y as f32 ), // bottom-left
-        (max_x as f32,  max_y as f32 ), // bottom-right
+        (0.0, 0.0),                   // top-left
+        (max_x as f32, 0.0),          // top-right
+        (0.0, max_y as f32),          // bottom-left
+        (max_x as f32, max_y as f32), // bottom-right
     ];
 
     let mut selected: [Option<Triangle>; 4] = [None, None, None, None];
@@ -1264,11 +1332,22 @@ fn find_anchors(triangles: &[Triangle]) -> Option<Anchors> {
         }
     }
 
-    let [Some(top_left), Some(top_right), Some(bottom_left), Some(bottom_right)] = selected else {
+    let [
+        Some(top_left),
+        Some(top_right),
+        Some(bottom_left),
+        Some(bottom_right),
+    ] = selected
+    else {
         return None;
     };
 
-    Some(Anchors { top_left, top_right, bottom_left, bottom_right })
+    Some(Anchors {
+        top_left,
+        top_right,
+        bottom_left,
+        bottom_right,
+    })
 }
 
 /// Sample a small rectangular region around (cx, cy) in a grayscale image.
