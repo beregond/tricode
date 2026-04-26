@@ -1,3 +1,7 @@
+/// A triangle whose bounding-box area exceeds this multiple of the largest anchor area
+/// is considered a cluster/merge false positive and is discarded before grid reading.
+const FALSE_POSITIVE_AREA_FACTOR: f32 = 1.2;
+
 use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, GrayImage, ImageBuffer, ImageEncoder, Rgba};
 use imageproc::contrast::{ThresholdType, threshold};
@@ -29,8 +33,8 @@ pub fn unpack_payload(bytes: &[u8]) -> Result<(String, String), String> {
     // in the same named/map mode — rmp_serde's default `from_slice` uses the
     // compact array format which is incompatible with named maps.
     let mut de = rmp_serde::Deserializer::new(bytes);
-    let envelope = Envelope::deserialize(&mut de)
-        .map_err(|e| format!("msgpack decode error: {}", e))?;
+    let envelope =
+        Envelope::deserialize(&mut de).map_err(|e| format!("msgpack decode error: {}", e))?;
     Ok((envelope.kind, envelope.value))
 }
 
@@ -638,6 +642,36 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
     // Find the four anchor triangles at the grid corners
     let anchors = find_anchors(&triangles).ok_or("Could not find anchor triangles")?;
 
+    // Remove false positives: any triangle significantly larger than the biggest anchor
+    // is a cluster/merge artefact and should be discarded.
+    let max_anchor_area = anchors
+        .all()
+        .iter()
+        .map(|t| {
+            let w = (t.max_x - t.min_x) as f32;
+            let h = (t.max_y - t.min_y) as f32;
+            w * h
+        })
+        .fold(0.0f32, f32::max);
+    let area_threshold = max_anchor_area * FALSE_POSITIVE_AREA_FACTOR;
+    let before = triangles.len();
+    let triangles: Vec<Triangle> = triangles
+        .into_iter()
+        .filter(|t| {
+            let w = (t.max_x - t.min_x) as f32;
+            let h = (t.max_y - t.min_y) as f32;
+            w * h <= area_threshold
+        })
+        .collect();
+    eprintln!(
+        "DEBUG false-positive filter: max_anchor_area={:.0} threshold={:.0} (factor={}) removed={} remaining={}",
+        max_anchor_area,
+        area_threshold,
+        FALSE_POSITIVE_AREA_FACTOR,
+        before - triangles.len(),
+        triangles.len()
+    );
+
     eprintln!("DEBUG anchors:");
     eprintln!(
         "  top_left:     center=({:.1}, {:.1})  bbox=({}, {})–({}, {})  pointing_{}",
@@ -702,7 +736,7 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
 
     // Draw rectangles on the annotated image
     let mut annotated_img = img.clone();
-    draw_rectangles(&mut annotated_img, &anchors);
+    draw_rectangles(&mut annotated_img, &triangles, &anchors);
 
     // Encode annotated image to PNG bytes
     let mut annotated_png = Vec::new();
@@ -790,11 +824,30 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
 
             // --- Attempt 3: try all ±1 permutations of (row_adj, col_adj) ---
             let offsets: &[(isize, isize)] = &[
-                (-2, -2), (-2, -1), (-2, 0), (-2, 1), (-2, 2),
-                (-1, -2), (-1, -1), (-1, 0), (-1, 1), (-1, 2),
-                ( 0, -2), ( 0, -1),          ( 0, 1), ( 0, 2),
-                ( 1, -2), ( 1, -1), ( 1, 0), ( 1, 1), ( 1, 2),
-                ( 2, -2), ( 2, -1), ( 2, 0), ( 2, 1), ( 2, 2),
+                (-2, -2),
+                (-2, -1),
+                (-2, 0),
+                (-2, 1),
+                (-2, 2),
+                (-1, -2),
+                (-1, -1),
+                (-1, 0),
+                (-1, 1),
+                (-1, 2),
+                (0, -2),
+                (0, -1),
+                (0, 1),
+                (0, 2),
+                (1, -2),
+                (1, -1),
+                (1, 0),
+                (1, 1),
+                (1, 2),
+                (2, -2),
+                (2, -1),
+                (2, 0),
+                (2, 1),
+                (2, 2),
             ];
             eprintln!(
                 "DEBUG attempt 3: trying ±2 permutations of rows={} cols={}",
@@ -1240,8 +1293,10 @@ fn calculate_row_count(anchors: &Anchors) -> usize {
 
 /// Calculate the number of columns by clustering triangles into rows
 /// and taking the maximum count across rows.
-fn calculate_column_count(anchors: &Anchors) -> usize {    // Estimate triangle width from anchors only
-    let mut widths: Vec<f32> = anchors.all()
+fn calculate_column_count(anchors: &Anchors) -> usize {
+    // Estimate triangle width from anchors only
+    let mut widths: Vec<f32> = anchors
+        .all()
         .iter()
         .map(|t| (t.max_x - t.min_x) as f32)
         .collect();
@@ -1458,56 +1513,62 @@ fn read_bits_from_grid(
     (bytes, bit_count)
 }
 
-/// Draw red rectangles on the image based on triangle bounding boxes
-fn draw_rectangles(img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>, anchors: &Anchors) {
+/// Draw bounding-box rectangles on the annotated image.
+/// All detected triangles are drawn in blue; the four anchors are drawn in red on top.
+fn draw_rectangles(
+    img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
+    triangles: &[Triangle],
+    anchors: &Anchors,
+) {
+    let blue = Rgba([0, 0, 255, 255]);
     let red = Rgba([255, 0, 0, 255]);
-    let border_width = 5;
+    let border_width = 2u32;
 
-    for triangle in anchors.all() {
-        // Draw rectangle borders
-        let min_x = triangle.min_x.min(img.width().saturating_sub(1));
-        let min_y = triangle.min_y.min(img.height().saturating_sub(1));
-        let max_x = triangle.max_x.min(img.width());
-        let max_y = triangle.max_y.min(img.height());
+    let draw_box = |img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
+                    t: &Triangle,
+                    color: Rgba<u8>,
+                    thickness: u32| {
+        let min_x = t.min_x.min(img.width().saturating_sub(1));
+        let min_y = t.min_y.min(img.height().saturating_sub(1));
+        let max_x = t.max_x.min(img.width());
+        let max_y = t.max_y.min(img.height());
 
         // Top border
         for x in min_x..max_x {
-            for dy in 0..border_width {
+            for dy in 0..thickness {
                 let y = (min_y + dy).min(img.height() - 1);
-                if x < img.width() && y < img.height() {
-                    img.put_pixel(x, y, red);
-                }
+                img.put_pixel(x, y, color);
             }
         }
-
         // Bottom border
         for x in min_x..max_x {
-            for dy in 0..border_width {
+            for dy in 0..thickness {
                 let y = max_y.saturating_sub(1 + dy);
-                if x < img.width() && y < img.height() {
-                    img.put_pixel(x, y, red);
-                }
+                img.put_pixel(x, y, color);
             }
         }
-
         // Left border
         for y in min_y..max_y {
-            for dx in 0..border_width {
+            for dx in 0..thickness {
                 let x = (min_x + dx).min(img.width() - 1);
-                if x < img.width() && y < img.height() {
-                    img.put_pixel(x, y, red);
-                }
+                img.put_pixel(x, y, color);
             }
         }
-
         // Right border
         for y in min_y..max_y {
-            for dx in 0..border_width {
+            for dx in 0..thickness {
                 let x = max_x.saturating_sub(1 + dx);
-                if x < img.width() && y < img.height() {
-                    img.put_pixel(x, y, red);
-                }
+                img.put_pixel(x, y, color);
             }
         }
+    };
+
+    // Draw all triangles in blue first
+    for t in triangles {
+        draw_box(img, t, blue, border_width);
+    }
+    // Draw anchors in red on top with a thicker border so they stand out
+    for t in anchors.all() {
+        draw_box(img, t, red, border_width * 2);
     }
 }
