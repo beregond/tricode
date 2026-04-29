@@ -340,7 +340,13 @@ class _MyHomePageState extends State<MyHomePage>
                         value: _showDebugInfo,
                         onChanged: (value) {
                           setDialogState(() {});
-                          setState(() => _showDebugInfo = value ?? false);
+                          final enabled = value ?? false;
+                          setState(() {
+                            _showDebugInfo = enabled;
+                            if (!enabled && _selectedPayloadType == 'plain') {
+                              _selectedPayloadType = 'text';
+                            }
+                          });
                         },
                       ),
                       actions: [
@@ -406,6 +412,8 @@ class _MyHomePageState extends State<MyHomePage>
                           ),
                         ),
                         const SizedBox(height: 8),
+                        _ContentTypeBadge(_decodeContentType),
+                        const SizedBox(height: 6),
                         if (_decodeContentType == 'url') ...[
                           GestureDetector(
                             onTap: () async {
@@ -436,7 +444,11 @@ class _MyHomePageState extends State<MyHomePage>
                             width: double.infinity,
                             padding: const EdgeInsets.all(16.0),
                             decoration: BoxDecoration(
-                              border: Border.all(color: Colors.green),
+                              border: Border.all(
+                                color: _decodeContentType == 'plain'
+                                    ? Colors.orange
+                                    : Colors.green,
+                              ),
                               borderRadius: BorderRadius.circular(8),
                             ),
                             child: SelectableText(
@@ -570,9 +582,11 @@ class _MyHomePageState extends State<MyHomePage>
                     ),
                     const SizedBox(height: 16),
                     SegmentedButton<String>(
-                      segments: const [
-                        ButtonSegment(value: 'text', label: Text('Text')),
-                        ButtonSegment(value: 'url', label: Text('URL')),
+                      segments: [
+                        const ButtonSegment(value: 'text', label: Text('Text')),
+                        const ButtonSegment(value: 'url', label: Text('URL')),
+                        if (_showDebugInfo)
+                          const ButtonSegment(value: 'plain', label: Text('Plain')),
                       ],
                       selected: {_selectedPayloadType},
                       onSelectionChanged: (selection) {
@@ -742,6 +756,40 @@ class _MyHomePageState extends State<MyHomePage>
     _widthRatioController.dispose();
     _heightRatioController.dispose();
     super.dispose();
+  }
+}
+
+class _ContentTypeBadge extends StatelessWidget {
+  const _ContentTypeBadge(this.contentType);
+  final String contentType;
+
+  @override
+  Widget build(BuildContext context) {
+    final (label, color) = switch (contentType) {
+      'url'   => ('URL', Colors.blue),
+      'plain' => ('PLAIN', Colors.orange),
+      _       => ('TEXT', Colors.green),
+    };
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(
+          color: color.withAlpha(30),
+          border: Border.all(color: color),
+          borderRadius: BorderRadius.circular(4),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.bold,
+            color: color,
+            letterSpacing: 0.8,
+          ),
+        ),
+      ),
+    );
   }
 }
 

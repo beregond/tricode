@@ -21,7 +21,15 @@ pub fn pack_payload(kind: &str, text: &str) -> Result<Vec<u8>, String> {
 }
 
 /// Unpack a msgpack blob produced by [`pack_payload`].
-/// Returns `(kind, value)` where `kind` is e.g. `"text"` or `"url"`.
+/// Returns `(kind, value)` where `kind` is e.g. `"text"`, `"url"`, or `"plain"`.
+///
+/// Fallback chain:
+/// 1. Try to deserialise as the expected `{"type": ..., "value": ...}` envelope → return `(kind, value)`.
+/// 2. If the struct match fails but it *is* valid msgpack, serialise the decoded value as a JSON
+///    string and return `("plain", json)`.
+/// 3. If it is not msgpack at all, try to interpret the raw bytes as UTF-8 and return
+///    `("plain", string)`.
+/// 4. Only if all three steps fail do we return `Err`.
 pub fn unpack_payload(bytes: &[u8]) -> Result<(String, String), String> {
     #[derive(Deserialize)]
     struct Envelope {
@@ -29,13 +37,34 @@ pub fn unpack_payload(bytes: &[u8]) -> Result<(String, String), String> {
         kind: String,
         value: String,
     }
+
+    // Step 1 — try to match the expected named-map envelope.
     // `to_vec_named` writes a msgpack map with string keys; we must deserialise
     // in the same named/map mode — rmp_serde's default `from_slice` uses the
     // compact array format which is incompatible with named maps.
     let mut de = rmp_serde::Deserializer::new(bytes);
-    let envelope =
-        Envelope::deserialize(&mut de).map_err(|e| format!("msgpack decode error: {}", e))?;
-    Ok((envelope.kind, envelope.value))
+    if let Ok(envelope) = Envelope::deserialize(&mut de) {
+        return Ok((envelope.kind, envelope.value));
+    }
+
+    // Step 2 — valid msgpack but wrong shape: decode to a generic JSON value and
+    // return the JSON representation so the caller still gets something useful.
+    let mut de2 = rmp_serde::Deserializer::new(bytes);
+    if let Ok(json_val) = serde_json::Value::deserialize(&mut de2) {
+        let json_str = serde_json::to_string(&json_val)
+            .unwrap_or_else(|_| json_val.to_string());
+        return Ok(("plain".to_string(), json_str));
+    }
+
+    // Step 3 — not msgpack at all: try raw UTF-8 bytes.
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return Ok(("plain".to_string(), s.to_string()));
+    }
+
+    Err(format!(
+        "payload is not a recognised msgpack envelope, valid msgpack, or UTF-8 text ({} bytes)",
+        bytes.len()
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -609,7 +638,7 @@ pub fn reed_solomon_decode(encoded_data: Vec<u8>) -> Result<Vec<u8>, String> {
 #[derive(Debug, Clone)]
 pub struct DecodeDebug {
     pub text: Option<String>,  // Some on success, None on decode failure
-    pub content_type: String,  // "text", "url", or empty on failure
+    pub content_type: String,  // "text", "url", "plain" (fallback), or empty on failure
     pub error: Option<String>, // Some on failure, None on success
     pub image_width: u32,
     pub image_height: u32,
