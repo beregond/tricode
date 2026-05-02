@@ -593,6 +593,16 @@ class _MyHomePageState extends State<MyHomePage>
                         setState(() {
                           _selectedPayloadType = selection.first;
                         });
+                        if (_textController.text.trim().isNotEmpty) {
+                          _sendTextToRust();
+                        } else {
+                          setState(() {
+                            _latestImage = null;
+                            _imageWidth = null;
+                            _imageHeight = null;
+                            _generateDebug = null;
+                          });
+                        }
                       },
                     ),
                     const SizedBox(height: 16),
