@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:rinf/rinf.dart';
@@ -85,7 +86,6 @@ class _MyHomePageState extends State<MyHomePage>
   String _selectedPayloadType = 'text';
   Color _fgColor = Colors.black;
   Color _bgColor = Colors.white;
-  bool _bgTransparent = false;
 
   bool get _shouldShowZoomControls {
     if (_imageWidth == null || _imageHeight == null) return false;
@@ -125,7 +125,6 @@ class _MyHomePageState extends State<MyHomePage>
           _selectedStyle = 0;
           _fgColor = Colors.black;
           _bgColor = Colors.white;
-          _bgTransparent = false;
         });
       }
     });
@@ -204,9 +203,7 @@ class _MyHomePageState extends State<MyHomePage>
       _isGenerating = true; // Start loading indicator
     });
 
-    final effectiveBg = _bgTransparent
-        ? const Color(0x00000000)
-        : _bgColor.withAlpha(255);
+    final effectiveBg = _bgColor;
 
     SmallText(
       text: text,
@@ -637,39 +634,29 @@ class _MyHomePageState extends State<MyHomePage>
                     ),
                     const SizedBox(height: 16),
                     // Color pickers
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                      child: Row(
-                        children: [
-                          _ColorSwatch(
-                            label: 'Triangles',
-                            color: _fgColor,
-                            showAlpha: false,
-                            onChanged: (c) {
-                              setState(() => _fgColor = c);
-                              if (_textController.text.trim().isNotEmpty) _sendTextToRust();
-                            },
-                          ),
-                          const SizedBox(width: 16),
-                          _ColorSwatch(
-                            label: 'Background',
-                            color: _bgTransparent ? Colors.transparent : _bgColor,
-                            showAlpha: true,
-                            isTransparent: _bgTransparent,
-                            onChanged: (c) {
-                              setState(() {
-                                _bgTransparent = false;
-                                _bgColor = c;
-                              });
-                              if (_textController.text.trim().isNotEmpty) _sendTextToRust();
-                            },
-                            onTransparentToggled: (t) {
-                              setState(() => _bgTransparent = t);
-                              if (_textController.text.trim().isNotEmpty) _sendTextToRust();
-                            },
-                          ),
-                        ],
-                      ),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        _ColorSwatch(
+                          label: 'Triangles',
+                          color: _fgColor,
+                          showAlpha: false,
+                          onChanged: (c) {
+                            setState(() => _fgColor = c);
+                            if (_textController.text.trim().isNotEmpty) _sendTextToRust();
+                          },
+                        ),
+                        const SizedBox(width: 24),
+                        _ColorSwatch(
+                          label: 'Background',
+                          color: _bgColor,
+                          showAlpha: true,
+                          onChanged: (c) {
+                            setState(() => _bgColor = c);
+                            if (_textController.text.trim().isNotEmpty) _sendTextToRust();
+                          },
+                        ),
+                      ],
                     ),
                     const SizedBox(height: 16),
                     ElevatedButton(
@@ -697,43 +684,57 @@ class _MyHomePageState extends State<MyHomePage>
                       ),
                       const SizedBox(height: 16),
                       // Image preview with zoom and pan
-                      Container(
-                        constraints: BoxConstraints(
-                          minWidth: 300,
-                          minHeight: 200,
-                          maxWidth: max(
-                            300.0,
-                            MediaQuery.of(context).size.width - 32,
+                      Listener(
+                        onPointerSignal: (event) {
+                          // Registering here (as an ancestor) means this fires
+                          // before the parent SingleChildScrollView's listener,
+                          // so we can claim the event and prevent page scrolling.
+                          // InteractiveViewer registers its own claim in the same
+                          // frame and, being a descendant, wins the resolver race
+                          // — so zooming still works normally.
+                          if (event is PointerScrollEvent) {
+                            GestureBinding.instance.pointerSignalResolver
+                                .register(event, (_) {});
+                          }
+                        },
+                        child: Container(
+                          constraints: BoxConstraints(
+                            minWidth: 300,
+                            minHeight: 200,
+                            maxWidth: max(
+                              300.0,
+                              MediaQuery.of(context).size.width - 32,
+                            ),
+                            maxHeight: max(200.0, 400),
                           ),
-                          maxHeight: max(200.0, 400),
-                        ),
-                        decoration: BoxDecoration(
-                          border: Border.all(color: Colors.grey),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(7),
-                          child: Stack(
-                            children: [
-                              Positioned.fill(
-                                child: CustomPaint(painter: _CheckerPainter()),
-                              ),
-                              InteractiveViewer(
-                                transformationController:
-                                    TransformationController(),
-                                boundaryMargin: const EdgeInsets.all(20),
-                                minScale: 0.5,
-                                maxScale: 5.0,
-                                clipBehavior: Clip.hardEdge,
-                                child: Transform.scale(
-                                  scale: _zoomLevel,
-                                  child: Image.memory(
-                                    _latestImage!,
-                                    fit: BoxFit.contain,
+                          decoration: BoxDecoration(
+                            border: Border.all(color: Colors.grey),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(7),
+                            child: Stack(
+                              children: [
+                                Positioned.fill(
+                                  child: CustomPaint(painter: _CheckerPainter()),
+                                ),
+                                InteractiveViewer(
+                                  transformationController:
+                                      TransformationController(),
+                                  boundaryMargin: const EdgeInsets.all(20),
+                                  minScale: 0.5,
+                                  maxScale: 5.0,
+                                  clipBehavior: Clip.hardEdge,
+                                  child: Transform.scale(
+                                    scale: _zoomLevel,
+                                    child: Image.memory(
+                                      _latestImage!,
+                                      fit: BoxFit.contain,
+                                    ),
                                   ),
                                 ),
-                              ),
-                            ],
+                              ],
+                            ),
                           ),
                         ),
                       ),
@@ -831,20 +832,15 @@ class _ColorSwatch extends StatelessWidget {
     required this.color,
     required this.showAlpha,
     required this.onChanged,
-    this.isTransparent = false,
-    this.onTransparentToggled,
   });
 
   final String label;
   final Color color;
   final bool showAlpha;
-  final bool isTransparent;
   final ValueChanged<Color> onChanged;
-  final ValueChanged<bool>? onTransparentToggled;
 
   void _openPicker(BuildContext context) {
-    Color pickerColor = isTransparent ? Colors.white : color;
-    bool transparent = isTransparent;
+    Color pickerColor = color;
 
     showDialog<void>(
       context: context,
@@ -852,27 +848,12 @@ class _ColorSwatch extends StatelessWidget {
         builder: (ctx, setS) => AlertDialog(
           title: Text('Pick $label color'),
           content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                ColorPicker(
-                  pickerColor: pickerColor,
-                  onColorChanged: (c) => setS(() => pickerColor = c),
-                  enableAlpha: showAlpha && !transparent,
-                  labelTypes: const [],
-                  pickerAreaHeightPercent: 0.7,
-                ),
-                if (showAlpha) ...[
-                  const SizedBox(height: 8),
-                  CheckboxListTile(
-                    title: const Text('Transparent'),
-                    value: transparent,
-                    onChanged: (v) => setS(() => transparent = v ?? false),
-                    controlAffinity: ListTileControlAffinity.leading,
-                    contentPadding: EdgeInsets.zero,
-                  ),
-                ],
-              ],
+            child: ColorPicker(
+              pickerColor: pickerColor,
+              onColorChanged: (c) => setS(() => pickerColor = c),
+              enableAlpha: showAlpha,
+              labelTypes: const [],
+              pickerAreaHeightPercent: 0.7,
             ),
           ),
           actions: [
@@ -883,8 +864,7 @@ class _ColorSwatch extends StatelessWidget {
             TextButton(
               onPressed: () {
                 Navigator.of(ctx).pop();
-                if (showAlpha) onTransparentToggled?.call(transparent);
-                if (!transparent) onChanged(pickerColor);
+                onChanged(pickerColor);
               },
               child: const Text('Select'),
             ),
@@ -896,6 +876,7 @@ class _ColorSwatch extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isTransparent = color.a == 0;
     return GestureDetector(
       onTap: () => _openPicker(context),
       child: Row(
