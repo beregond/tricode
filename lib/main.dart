@@ -338,37 +338,37 @@ class _MyHomePageState extends State<MyHomePage>
               padding: EdgeInsets.only(right: kDebugMode ? 48.0 : 0.0),
               child: IconButton(
                 icon: const Icon(Icons.settings),
-              tooltip: 'Settings',
-              onPressed: () {
-                showDialog<void>(
-                  context: context,
-                  builder: (context) => StatefulBuilder(
-                    builder: (context, setDialogState) => AlertDialog(
-                      title: const Text('Settings'),
-                      content: CheckboxListTile(
-                        title: const Text('Show debug info'),
-                        value: _showDebugInfo,
-                        onChanged: (value) {
-                          setDialogState(() {});
-                          final enabled = value ?? false;
-                          setState(() {
-                            _showDebugInfo = enabled;
-                            if (!enabled && _selectedPayloadType == 'plain') {
-                              _selectedPayloadType = 'text';
-                            }
-                          });
-                        },
-                      ),
-                      actions: [
-                        TextButton(
-                          onPressed: () => Navigator.of(context).pop(),
-                          child: const Text('Close'),
+                tooltip: 'Settings',
+                onPressed: () {
+                  showDialog<void>(
+                    context: context,
+                    builder: (context) => StatefulBuilder(
+                      builder: (context, setDialogState) => AlertDialog(
+                        title: const Text('Settings'),
+                        content: CheckboxListTile(
+                          title: const Text('Show debug info'),
+                          value: _showDebugInfo,
+                          onChanged: (value) {
+                            setDialogState(() {});
+                            final enabled = value ?? false;
+                            setState(() {
+                              _showDebugInfo = enabled;
+                              if (!enabled && _selectedPayloadType == 'plain') {
+                                _selectedPayloadType = 'text';
+                              }
+                            });
+                          },
                         ),
-                      ],
+                        actions: [
+                          TextButton(
+                            onPressed: () => Navigator.of(context).pop(),
+                            child: const Text('Close'),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                );
-              },
+                  );
+                },
               ),
             ),
           ],
@@ -429,7 +429,10 @@ class _MyHomePageState extends State<MyHomePage>
                             onTap: () async {
                               final uri = Uri.tryParse(_decodeText!);
                               if (uri != null && await canLaunchUrl(uri)) {
-                                await launchUrl(uri, mode: LaunchMode.externalApplication);
+                                await launchUrl(
+                                  uri,
+                                  mode: LaunchMode.externalApplication,
+                                );
                               }
                             },
                             child: Container(
@@ -534,279 +537,286 @@ class _MyHomePageState extends State<MyHomePage>
               ),
             ),
             SingleChildScrollView(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.start,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: TextField(
-                        controller: _textController,
-                        keyboardType: TextInputType.multiline,
-                        textInputAction: TextInputAction.newline,
-                        minLines: 3,
-                        maxLines: null,
-                        decoration: const InputDecoration(
-                          labelText: 'Enter text',
-                          border: OutlineInputBorder(),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: TextField(
+                      controller: _textController,
+                      keyboardType: TextInputType.multiline,
+                      textInputAction: TextInputAction.newline,
+                      minLines: 3,
+                      maxLines: null,
+                      decoration: const InputDecoration(
+                        labelText: 'Enter text',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _widthRatioController,
+                            keyboardType: TextInputType.number,
+                            decoration: const InputDecoration(
+                              labelText: 'Width Ratio',
+                              border: OutlineInputBorder(),
+                              hintText: '21',
+                            ),
+                          ),
+                        ),
+                        const Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 8.0),
+                          child: Text(
+                            ':',
+                            style: TextStyle(
+                              fontSize: 24,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                        Expanded(
+                          child: TextField(
+                            controller: _heightRatioController,
+                            keyboardType: TextInputType.number,
+                            decoration: const InputDecoration(
+                              labelText: 'Height Ratio',
+                              border: OutlineInputBorder(),
+                              hintText: '13',
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  SegmentedButton<String>(
+                    segments: [
+                      const ButtonSegment(value: 'text', label: Text('Text')),
+                      const ButtonSegment(value: 'url', label: Text('URL')),
+                      if (_showDebugInfo)
+                        const ButtonSegment(
+                          value: 'plain',
+                          label: Text('Plain'),
+                        ),
+                    ],
+                    selected: {_selectedPayloadType},
+                    onSelectionChanged: (selection) {
+                      setState(() {
+                        _selectedPayloadType = selection.first;
+                      });
+                      if (_textController.text.trim().isNotEmpty) {
+                        _sendTextToRust();
+                      } else {
+                        setState(() {
+                          _latestImage = null;
+                          _imageWidth = null;
+                          _imageHeight = null;
+                          _generateDebug = null;
+                        });
+                      }
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                  SegmentedButton<int>(
+                    segments: const [
+                      ButtonSegment(value: 0, label: Text('Tiles')),
+                      ButtonSegment(value: 1, label: Text('Stain')),
+                      ButtonSegment(value: 2, label: Text('Horizon')),
+                    ],
+                    selected: {_selectedStyle},
+                    onSelectionChanged: (selection) {
+                      setState(() {
+                        _selectedStyle = selection.first;
+                      });
+                      if (_textController.text.trim().isNotEmpty) {
+                        _sendTextToRust();
+                      }
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                  // Color pickers
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      _ColorSwatch(
+                        label: 'Triangles',
+                        color: _fgColor,
+                        showAlpha: false,
+                        onChanged: (c) {
+                          setState(() => _fgColor = c);
+                          if (_textController.text.trim().isNotEmpty) {
+                            _sendTextToRust();
+                          }
+                        },
+                      ),
+                      const SizedBox(width: 24),
+                      _ColorSwatch(
+                        label: 'Background',
+                        color: _bgColor,
+                        showAlpha: true,
+                        onChanged: (c) {
+                          setState(() => _bgColor = c);
+                          if (_textController.text.trim().isNotEmpty) {
+                            _sendTextToRust();
+                          }
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  ElevatedButton(
+                    onPressed: _textController.text.trim().isEmpty
+                        ? null
+                        : _sendTextToRust,
+                    child: const Text('Generate'),
+                  ),
+                  const SizedBox(height: 20),
+                  if (_isGenerating) ...[
+                    const SizedBox(
+                      width: 50,
+                      height: 50,
+                      child: CircularProgressIndicator(),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text('Generating image...'),
+                    const SizedBox(height: 20),
+                  ] else if (_latestImage != null) ...[
+                    const Divider(height: 40, thickness: 1),
+                    ElevatedButton.icon(
+                      onPressed: _downloadImage,
+                      icon: const Icon(Icons.download),
+                      label: const Text('Download Image'),
+                    ),
+                    const SizedBox(height: 16),
+                    // Image preview with zoom and pan
+                    Listener(
+                      onPointerSignal: (event) {
+                        // Registering here (as an ancestor) means this fires
+                        // before the parent SingleChildScrollView's listener,
+                        // so we can claim the event and prevent page scrolling.
+                        // InteractiveViewer registers its own claim in the same
+                        // frame and, being a descendant, wins the resolver race
+                        // — so zooming still works normally.
+                        if (event is PointerScrollEvent) {
+                          GestureBinding.instance.pointerSignalResolver
+                              .register(event, (_) {});
+                        }
+                      },
+                      child: Container(
+                        constraints: BoxConstraints(
+                          minWidth: 300,
+                          minHeight: 200,
+                          maxWidth: max(
+                            300.0,
+                            MediaQuery.of(context).size.width - 32,
+                          ),
+                          maxHeight: max(200.0, 400),
+                        ),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.grey),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(7),
+                          child: Stack(
+                            children: [
+                              Positioned.fill(
+                                child: CustomPaint(painter: _CheckerPainter()),
+                              ),
+                              InteractiveViewer(
+                                transformationController:
+                                    TransformationController(),
+                                boundaryMargin: const EdgeInsets.all(20),
+                                minScale: 0.5,
+                                maxScale: 5.0,
+                                clipBehavior: Clip.hardEdge,
+                                child: Transform.scale(
+                                  scale: _zoomLevel,
+                                  child: Image.memory(
+                                    _latestImage!,
+                                    fit: BoxFit.contain,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                      child: Row(
+                    // Zoom controls - only show if image is bigger than container
+                    if (_shouldShowZoomControls) ...[
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Expanded(
-                            child: TextField(
-                              controller: _widthRatioController,
-                              keyboardType: TextInputType.number,
-                              decoration: const InputDecoration(
-                                labelText: 'Width Ratio',
-                                border: OutlineInputBorder(),
-                                hintText: '21',
-                              ),
+                          IconButton(
+                            icon: const Icon(Icons.zoom_out),
+                            onPressed: () => setState(() {
+                              _zoomLevel = (_zoomLevel - 0.2).clamp(0.5, 5.0);
+                            }),
+                          ),
+                          SizedBox(
+                            width: 150,
+                            child: Slider(
+                              value: _zoomLevel,
+                              min: 0.5,
+                              max: 5.0,
+                              divisions: 45,
+                              label:
+                                  '${(_zoomLevel * 100).toStringAsFixed(0)}%',
+                              onChanged: (value) => setState(() {
+                                _zoomLevel = value;
+                              }),
                             ),
                           ),
-                          const Padding(
-                            padding: EdgeInsets.symmetric(horizontal: 8.0),
-                            child: Text(
-                              ':',
-                              style: TextStyle(
-                                fontSize: 24,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
+                          IconButton(
+                            icon: const Icon(Icons.zoom_in),
+                            onPressed: () => setState(() {
+                              _zoomLevel = (_zoomLevel + 0.2).clamp(0.5, 5.0);
+                            }),
                           ),
-                          Expanded(
-                            child: TextField(
-                              controller: _heightRatioController,
-                              keyboardType: TextInputType.number,
-                              decoration: const InputDecoration(
-                                labelText: 'Height Ratio',
-                                border: OutlineInputBorder(),
-                                hintText: '13',
-                              ),
-                            ),
+                          IconButton(
+                            icon: const Icon(Icons.refresh),
+                            onPressed: () => setState(() {
+                              _zoomLevel = 1.0;
+                            }),
                           ),
                         ],
                       ),
-                    ),
-                    const SizedBox(height: 16),
-                    SegmentedButton<String>(
-                      segments: [
-                        const ButtonSegment(value: 'text', label: Text('Text')),
-                        const ButtonSegment(value: 'url', label: Text('URL')),
-                        if (_showDebugInfo)
-                          const ButtonSegment(value: 'plain', label: Text('Plain')),
-                      ],
-                      selected: {_selectedPayloadType},
-                      onSelectionChanged: (selection) {
-                        setState(() {
-                          _selectedPayloadType = selection.first;
-                        });
-                        if (_textController.text.trim().isNotEmpty) {
-                          _sendTextToRust();
-                        } else {
-                          setState(() {
-                            _latestImage = null;
-                            _imageWidth = null;
-                            _imageHeight = null;
-                            _generateDebug = null;
-                          });
-                        }
-                      },
-                    ),
-                    const SizedBox(height: 16),
-                    SegmentedButton<int>(
-                      segments: const [
-                        ButtonSegment(value: 0, label: Text('Tiles')),
-                        ButtonSegment(value: 1, label: Text('Stain')),
-                        ButtonSegment(value: 2, label: Text('Horizon')),
-                      ],
-                      selected: {_selectedStyle},
-                      onSelectionChanged: (selection) {
-                        setState(() {
-                          _selectedStyle = selection.first;
-                        });
-                        if (_textController.text.trim().isNotEmpty) {
-                          _sendTextToRust();
-                        }
-                      },
-                    ),
-                    const SizedBox(height: 16),
-                    // Color pickers
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        _ColorSwatch(
-                          label: 'Triangles',
-                          color: _fgColor,
-                          showAlpha: false,
-                          onChanged: (c) {
-                            setState(() => _fgColor = c);
-                            if (_textController.text.trim().isNotEmpty) _sendTextToRust();
-                          },
+                    ],
+                    if (_showDebugInfo && _generateDebug != null) ...[
+                      const SizedBox(height: 24),
+                      const Divider(),
+                      const SizedBox(height: 8),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                        child: const Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            'Debug info',
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.grey,
+                            ),
+                          ),
                         ),
-                        const SizedBox(width: 24),
-                        _ColorSwatch(
-                          label: 'Background',
-                          color: _bgColor,
-                          showAlpha: true,
-                          onChanged: (c) {
-                            setState(() => _bgColor = c);
-                            if (_textController.text.trim().isNotEmpty) _sendTextToRust();
-                          },
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
-                    ElevatedButton(
-                      onPressed: _textController.text.trim().isEmpty
-                          ? null
-                          : _sendTextToRust,
-                      child: const Text('Generate'),
-                    ),
-                    const SizedBox(height: 20),
-                    if (_isGenerating) ...[
-                      const SizedBox(
-                        width: 50,
-                        height: 50,
-                        child: CircularProgressIndicator(),
                       ),
                       const SizedBox(height: 8),
-                      const Text('Generating image...'),
-                      const SizedBox(height: 20),
-                    ] else if (_latestImage != null) ...[
-                      const Divider(height: 40, thickness: 1),
-                      ElevatedButton.icon(
-                        onPressed: _downloadImage,
-                        icon: const Icon(Icons.download),
-                        label: const Text('Download Image'),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                        child: _GenerateDebugTable(_generateDebug!),
                       ),
-                      const SizedBox(height: 16),
-                      // Image preview with zoom and pan
-                      Listener(
-                        onPointerSignal: (event) {
-                          // Registering here (as an ancestor) means this fires
-                          // before the parent SingleChildScrollView's listener,
-                          // so we can claim the event and prevent page scrolling.
-                          // InteractiveViewer registers its own claim in the same
-                          // frame and, being a descendant, wins the resolver race
-                          // — so zooming still works normally.
-                          if (event is PointerScrollEvent) {
-                            GestureBinding.instance.pointerSignalResolver
-                                .register(event, (_) {});
-                          }
-                        },
-                        child: Container(
-                          constraints: BoxConstraints(
-                            minWidth: 300,
-                            minHeight: 200,
-                            maxWidth: max(
-                              300.0,
-                              MediaQuery.of(context).size.width - 32,
-                            ),
-                            maxHeight: max(200.0, 400),
-                          ),
-                          decoration: BoxDecoration(
-                            border: Border.all(color: Colors.grey),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(7),
-                            child: Stack(
-                              children: [
-                                Positioned.fill(
-                                  child: CustomPaint(painter: _CheckerPainter()),
-                                ),
-                                InteractiveViewer(
-                                  transformationController:
-                                      TransformationController(),
-                                  boundaryMargin: const EdgeInsets.all(20),
-                                  minScale: 0.5,
-                                  maxScale: 5.0,
-                                  clipBehavior: Clip.hardEdge,
-                                  child: Transform.scale(
-                                    scale: _zoomLevel,
-                                    child: Image.memory(
-                                      _latestImage!,
-                                      fit: BoxFit.contain,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                      // Zoom controls - only show if image is bigger than container
-                      if (_shouldShowZoomControls) ...[
-                        const SizedBox(height: 8),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            IconButton(
-                              icon: const Icon(Icons.zoom_out),
-                              onPressed: () => setState(() {
-                                _zoomLevel = (_zoomLevel - 0.2).clamp(0.5, 5.0);
-                              }),
-                            ),
-                            SizedBox(
-                              width: 150,
-                              child: Slider(
-                                value: _zoomLevel,
-                                min: 0.5,
-                                max: 5.0,
-                                divisions: 45,
-                                label:
-                                    '${(_zoomLevel * 100).toStringAsFixed(0)}%',
-                                onChanged: (value) => setState(() {
-                                  _zoomLevel = value;
-                                }),
-                              ),
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.zoom_in),
-                              onPressed: () => setState(() {
-                                _zoomLevel = (_zoomLevel + 0.2).clamp(0.5, 5.0);
-                              }),
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.refresh),
-                              onPressed: () => setState(() {
-                                _zoomLevel = 1.0;
-                              }),
-                            ),
-                          ],
-                        ),
-                      ],
-                      if (_showDebugInfo && _generateDebug != null) ...[
-                        const SizedBox(height: 24),
-                        const Divider(),
-                        const SizedBox(height: 8),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                          child: const Align(
-                            alignment: Alignment.centerLeft,
-                            child: Text(
-                              'Debug info',
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.grey,
-                              ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                          child: _GenerateDebugTable(_generateDebug!),
-                        ),
-                      ],
-                      const SizedBox(height: 20),
                     ],
+                    const SizedBox(height: 20),
                   ],
-                ),
+                ],
+              ),
             ),
           ],
         ),
@@ -848,12 +858,17 @@ class _ColorSwatch extends StatelessWidget {
         builder: (ctx, setS) => AlertDialog(
           title: Text('Pick $label color'),
           content: SingleChildScrollView(
-            child: ColorPicker(
-              pickerColor: pickerColor,
-              onColorChanged: (c) => setS(() => pickerColor = c),
-              enableAlpha: showAlpha,
-              labelTypes: const [],
-              pickerAreaHeightPercent: 0.7,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ColorPicker(
+                  pickerColor: pickerColor,
+                  onColorChanged: (c) => setS(() => pickerColor = c),
+                  enableAlpha: showAlpha,
+                  labelTypes: const [],
+                  hexInputBar: true,
+                ),
+              ],
             ),
           ),
           actions: [
@@ -913,8 +928,12 @@ class _CheckerPainter extends CustomPainter {
     final dark = Paint()..color = const Color(0xFFCCCCCC);
     for (double y = 0; y < size.height; y += cellSize) {
       for (double x = 0; x < size.width; x += cellSize) {
-        final isLight = ((x / cellSize).floor() + (y / cellSize).floor()) % 2 == 0;
-        canvas.drawRect(Rect.fromLTWH(x, y, cellSize, cellSize), isLight ? light : dark);
+        final isLight =
+            ((x / cellSize).floor() + (y / cellSize).floor()) % 2 == 0;
+        canvas.drawRect(
+          Rect.fromLTWH(x, y, cellSize, cellSize),
+          isLight ? light : dark,
+        );
       }
     }
   }
@@ -930,9 +949,9 @@ class _ContentTypeBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final (label, color) = switch (contentType) {
-      'url'   => ('URL', Colors.blue),
+      'url' => ('URL', Colors.blue),
       'plain' => ('PLAIN', Colors.orange),
-      _       => ('TEXT', Colors.green),
+      _ => ('TEXT', Colors.green),
     };
     return Align(
       alignment: Alignment.centerLeft,
