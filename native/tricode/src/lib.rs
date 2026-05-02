@@ -147,6 +147,16 @@ pub struct GenerateDebug {
     pub padding_bits: usize,   // zero-fill bits to complete the grid
 }
 
+/// Convert a Flutter/Android-style ARGB `u32` (`0xAARRGGBB`) to an `Rgba<u8>`.
+/// If `force_opaque` is true the alpha channel is set to 255 regardless.
+fn argb_to_rgba(argb: u32, force_opaque: bool) -> Rgba<u8> {
+    let a = ((argb >> 24) & 0xFF) as u8;
+    let r = ((argb >> 16) & 0xFF) as u8;
+    let g = ((argb >>  8) & 0xFF) as u8;
+    let b = ( argb        & 0xFF) as u8;
+    Rgba([r, g, b, if force_opaque { 255 } else { a }])
+}
+
 /// Generates a PNG image encoding the payload text.
 /// The payload is first encoded with Reed-Solomon error correction,
 /// then the binary data is visualized as pixels: 0 bits = white, 1 bits = black.
@@ -165,8 +175,15 @@ pub fn generate_image(
         Err(_) => return Vec::new(),
     };
 
-    create_image_from_binary_data(&encoded_data, width_ratio, height_ratio, ImageStyle::Tiles)
-        .png_bytes
+    create_image_from_binary_data(
+        &encoded_data,
+        width_ratio,
+        height_ratio,
+        ImageStyle::Tiles,
+        argb_to_rgba(0xFF000000, true),
+        argb_to_rgba(0xFFFFFFFF, false),
+    )
+    .png_bytes
 }
 
 /// Generates a PNG image encoding the payload text, returning full debug info.
@@ -176,6 +193,8 @@ pub fn generate_image_debug(
     width_ratio: u32,
     height_ratio: u32,
     style: ImageStyle,
+    fg_color: u32,
+    bg_color: u32,
 ) -> Option<GenerateDebug> {
     let payload_bytes = match pack_payload(payload_type, payload) {
         Ok(b) => b,
@@ -191,17 +210,21 @@ pub fn generate_image_debug(
         width_ratio,
         height_ratio,
         style,
+        argb_to_rgba(fg_color, true),
+        argb_to_rgba(bg_color, false),
     ))
 }
 
 /// Creates a PNG image from binary data maintaining the specified aspect ratio.
-/// Binary data is encoded as: 0 bits = white pixels, 1 bits = black pixels.
+/// Binary data is encoded as: 0 bits = background color, 1 bits = foreground color.
 /// Each bit is represented by a 4x4 square of pixels.
 fn create_image_from_binary_data(
     encoded_data: &[u8],
     width_ratio: u32,
     height_ratio: u32,
     style: ImageStyle,
+    fg: Rgba<u8>,
+    bg: Rgba<u8>,
 ) -> GenerateDebug {
     // Pre-compute the Horizon layout so the algorithm lives in one place and
     // the renderer below just queries it.
@@ -251,9 +274,9 @@ fn create_image_from_binary_data(
 
     let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::new(width, height);
 
-    // Fill with white background
+    // Fill with background color
     for pixel in img.pixels_mut() {
-        *pixel = Rgba([255, 255, 255, 255]);
+        *pixel = bg;
     }
 
     // Fill image with encoded data bits (each bit as a 4x4 square)
@@ -287,15 +310,13 @@ fn create_image_from_binary_data(
                 }
             };
 
-            // 0 = white, 1 = black
-            let (color, border) = if bit == 0 { (255, 255) } else { (0, 255) };
-            let rgba = Rgba([color, color, color, 255]);
+            // 0 = background, 1 = foreground
+            let rgba = if bit == 1 { fg } else { bg };
 
             let w = PIXELS_PER_BIT_WIDTH as f64;
             let h = pixels_per_bit_height as f64;
             let center_x = (w - 1.0) / 2.0;
             let denom = (h - 1.0).max(1.0);
-            let _border_color = Rgba([border, border, border, 255]);
 
             if bit == 1 {
                 // Fill the equilateral triangle with border

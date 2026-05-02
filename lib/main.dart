@@ -6,6 +6,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:rinf/rinf.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:path_provider/path_provider.dart';
@@ -82,6 +83,9 @@ class _MyHomePageState extends State<MyHomePage>
   GeneratedImage? _generateDebug;
   bool _showDebugInfo = false;
   String _selectedPayloadType = 'text';
+  Color _fgColor = Colors.black;
+  Color _bgColor = Colors.white;
+  bool _bgTransparent = false;
 
   bool get _shouldShowZoomControls {
     if (_imageWidth == null || _imageHeight == null) return false;
@@ -119,6 +123,9 @@ class _MyHomePageState extends State<MyHomePage>
           _isGenerating = false;
           _generateDebug = null;
           _selectedStyle = 0;
+          _fgColor = Colors.black;
+          _bgColor = Colors.white;
+          _bgTransparent = false;
         });
       }
     });
@@ -197,12 +204,18 @@ class _MyHomePageState extends State<MyHomePage>
       _isGenerating = true; // Start loading indicator
     });
 
+    final effectiveBg = _bgTransparent
+        ? const Color(0x00000000)
+        : _bgColor.withAlpha(255);
+
     SmallText(
       text: text,
       widthRatio: safeWidth,
       heightRatio: safeHeight,
       style: _selectedStyle,
       payloadType: _selectedPayloadType,
+      fgColor: _fgColor.withAlpha(255).toARGB32(),
+      bgColor: effectiveBg.toARGB32(),
     ).sendSignalToRust();
   }
 
@@ -623,6 +636,42 @@ class _MyHomePageState extends State<MyHomePage>
                       },
                     ),
                     const SizedBox(height: 16),
+                    // Color pickers
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                      child: Row(
+                        children: [
+                          _ColorSwatch(
+                            label: 'Triangles',
+                            color: _fgColor,
+                            showAlpha: false,
+                            onChanged: (c) {
+                              setState(() => _fgColor = c);
+                              if (_textController.text.trim().isNotEmpty) _sendTextToRust();
+                            },
+                          ),
+                          const SizedBox(width: 16),
+                          _ColorSwatch(
+                            label: 'Background',
+                            color: _bgTransparent ? Colors.transparent : _bgColor,
+                            showAlpha: true,
+                            isTransparent: _bgTransparent,
+                            onChanged: (c) {
+                              setState(() {
+                                _bgTransparent = false;
+                                _bgColor = c;
+                              });
+                              if (_textController.text.trim().isNotEmpty) _sendTextToRust();
+                            },
+                            onTransparentToggled: (t) {
+                              setState(() => _bgTransparent = t);
+                              if (_textController.text.trim().isNotEmpty) _sendTextToRust();
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
                     ElevatedButton(
                       onPressed: _textController.text.trim().isEmpty
                           ? null
@@ -664,20 +713,27 @@ class _MyHomePageState extends State<MyHomePage>
                         ),
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(7),
-                          child: InteractiveViewer(
-                            transformationController:
-                                TransformationController(),
-                            boundaryMargin: const EdgeInsets.all(20),
-                            minScale: 0.5,
-                            maxScale: 5.0,
-                            clipBehavior: Clip.hardEdge,
-                            child: Transform.scale(
-                              scale: _zoomLevel,
-                              child: Image.memory(
-                                _latestImage!,
-                                fit: BoxFit.contain,
+                          child: Stack(
+                            children: [
+                              Positioned.fill(
+                                child: CustomPaint(painter: _CheckerPainter()),
                               ),
-                            ),
+                              InteractiveViewer(
+                                transformationController:
+                                    TransformationController(),
+                                boundaryMargin: const EdgeInsets.all(20),
+                                minScale: 0.5,
+                                maxScale: 5.0,
+                                clipBehavior: Clip.hardEdge,
+                                child: Transform.scale(
+                                  scale: _zoomLevel,
+                                  child: Image.memory(
+                                    _latestImage!,
+                                    fit: BoxFit.contain,
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                       ),
@@ -767,6 +823,123 @@ class _MyHomePageState extends State<MyHomePage>
     _heightRatioController.dispose();
     super.dispose();
   }
+}
+
+class _ColorSwatch extends StatelessWidget {
+  const _ColorSwatch({
+    required this.label,
+    required this.color,
+    required this.showAlpha,
+    required this.onChanged,
+    this.isTransparent = false,
+    this.onTransparentToggled,
+  });
+
+  final String label;
+  final Color color;
+  final bool showAlpha;
+  final bool isTransparent;
+  final ValueChanged<Color> onChanged;
+  final ValueChanged<bool>? onTransparentToggled;
+
+  void _openPicker(BuildContext context) {
+    Color pickerColor = isTransparent ? Colors.white : color;
+    bool transparent = isTransparent;
+
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setS) => AlertDialog(
+          title: Text('Pick $label color'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ColorPicker(
+                  pickerColor: pickerColor,
+                  onColorChanged: (c) => setS(() => pickerColor = c),
+                  enableAlpha: showAlpha && !transparent,
+                  labelTypes: const [],
+                  pickerAreaHeightPercent: 0.7,
+                ),
+                if (showAlpha) ...[
+                  const SizedBox(height: 8),
+                  CheckboxListTile(
+                    title: const Text('Transparent'),
+                    value: transparent,
+                    onChanged: (v) => setS(() => transparent = v ?? false),
+                    controlAffinity: ListTileControlAffinity.leading,
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.of(ctx).pop();
+                if (showAlpha) onTransparentToggled?.call(transparent);
+                if (!transparent) onChanged(pickerColor);
+              },
+              child: const Text('Select'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () => _openPicker(context),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 28,
+            height: 28,
+            decoration: BoxDecoration(
+              border: Border.all(color: Colors.grey),
+              borderRadius: BorderRadius.circular(4),
+              color: isTransparent ? null : color,
+            ),
+            child: isTransparent
+                ? ClipRRect(
+                    borderRadius: BorderRadius.circular(3),
+                    child: CustomPaint(painter: _CheckerPainter()),
+                  )
+                : null,
+          ),
+          const SizedBox(width: 6),
+          Text(label, style: const TextStyle(fontSize: 13)),
+        ],
+      ),
+    );
+  }
+}
+
+class _CheckerPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    const cellSize = 4.0;
+    final light = Paint()..color = Colors.white;
+    final dark = Paint()..color = const Color(0xFFCCCCCC);
+    for (double y = 0; y < size.height; y += cellSize) {
+      for (double x = 0; x < size.width; x += cellSize) {
+        final isLight = ((x / cellSize).floor() + (y / cellSize).floor()) % 2 == 0;
+        canvas.drawRect(Rect.fromLTWH(x, y, cellSize, cellSize), isLight ? light : dark);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_CheckerPainter old) => false;
 }
 
 class _ContentTypeBadge extends StatelessWidget {

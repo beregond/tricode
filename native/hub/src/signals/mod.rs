@@ -7,10 +7,14 @@ pub struct SmallText {
     pub text: String,
     pub width_ratio: u32,
     pub height_ratio: u32,
-    /// 0 = Tiles, 1 = Stain
+    /// 0 = Tiles, 1 = Stain, 2 = Horizon
     pub style: u32,
-    /// "text" or "url"
+    /// "text", "url", or "plain"
     pub payload_type: String,
+    /// Foreground (triangle) color — ARGB u32, alpha is ignored (always fully opaque)
+    pub fg_color: u32,
+    /// Background color — ARGB u32, alpha 0 means fully transparent
+    pub bg_color: u32,
 }
 
 /// Image bytes to be decoded.
