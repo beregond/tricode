@@ -15,6 +15,8 @@ pub struct SmallText {
     pub fg_color: u32,
     /// Background color — ARGB u32, alpha 0 means fully transparent
     pub bg_color: u32,
+    /// Seed controlling the Horizon style layout; 0 means "use current unix time"
+    pub horizon_seed: u64,
 }
 
 /// Image bytes to be decoded.

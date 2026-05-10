@@ -104,21 +104,24 @@ pub struct HorizonLayout {
 }
 
 impl HorizonLayout {
-    /// Generate a random layout for a grid of `rows` × `cols` triangles.
-    pub fn generate_random(rows: u32, cols: u32) -> Self {
+    /// Generate a layout for a grid of `rows` × `cols` triangles driven by
+    /// `seed`.  Pass `0` to use the current unix-time seconds as the seed.
+    pub fn from_seed(rows: u32, cols: u32, seed: u64) -> Self {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         use std::time::SystemTime;
 
-        // Simple deterministic-ish seed from wall-clock time so each call
-        // produces a different layout without pulling in an external crate.
-        let seed = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(42);
+        let effective_seed = if seed == 0 {
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(42)
+        } else {
+            seed
+        };
 
         let mut hasher = DefaultHasher::new();
-        seed.hash(&mut hasher);
+        effective_seed.hash(&mut hasher);
 
         let mut has_border = Vec::with_capacity(rows as usize);
         for row in 0..rows {
@@ -182,6 +185,7 @@ pub fn generate_image(
         ImageStyle::Tiles,
         argb_to_rgba(0xFF000000, true),
         argb_to_rgba(0xFFFFFFFF, false),
+        0,
     )
     .png_bytes
 }
@@ -195,6 +199,7 @@ pub fn generate_image_debug(
     style: ImageStyle,
     fg_color: u32,
     bg_color: u32,
+    horizon_seed: u64,
 ) -> Option<GenerateDebug> {
     let payload_bytes = match pack_payload(payload_type, payload) {
         Ok(b) => b,
@@ -212,6 +217,7 @@ pub fn generate_image_debug(
         style,
         argb_to_rgba(fg_color, true),
         argb_to_rgba(bg_color, false),
+        horizon_seed,
     ))
 }
 
@@ -225,6 +231,7 @@ fn create_image_from_binary_data(
     style: ImageStyle,
     fg: Rgba<u8>,
     bg: Rgba<u8>,
+    horizon_seed: u64,
 ) -> GenerateDebug {
     // Pre-compute the Horizon layout so the algorithm lives in one place and
     // the renderer below just queries it.
@@ -254,9 +261,10 @@ fn create_image_from_binary_data(
 
     // Now that we know the grid size, build the Horizon layout if needed.
     let horizon_layout: Option<HorizonLayout> = if style == ImageStyle::Horizon {
-        Some(HorizonLayout::generate_random(
+        Some(HorizonLayout::from_seed(
             height_squares,
             width_squares,
+            horizon_seed,
         ))
     } else {
         horizon_layout // None for Tiles / Stain
@@ -343,22 +351,22 @@ fn create_image_from_binary_data(
                             let py = padding_y + square_y * pixels_per_bit_height + dy;
 
                             // Check if this pixel is on a border
-                            // TODO: maybe simpler?
-                            //
-                            // For Horizon, non-bordered triangles use a 3× thicker gap
-                            // so the style reads as visually distinct from plain Tiles.
+                            // For Horizon, all triangles share the same thick border (3.0).
+                            // Triangles flagged has_border=true are drawn in red instead of
+                            // their normal colour — no size difference, just a colour change.
                             let border_thickness: f64 = match style {
-                                ImageStyle::Horizon => {
-                                    let tri_has_border = horizon_layout
-                                        .as_ref()
-                                        .and_then(|l| l.has_border.get(square_y as usize))
-                                        .and_then(|row| row.get(square_x as usize))
-                                        .copied()
-                                        .unwrap_or(false);
-                                    if tri_has_border { 0.0 } else { 3.0 }
-                                }
+                                ImageStyle::Horizon => 3.0,
                                 ImageStyle::Tiles => 1.0,
                                 ImageStyle::Stain => 0.0,
+                            };
+
+                            let horizon_highlighted = matches!(style, ImageStyle::Horizon) && {
+                                horizon_layout
+                                    .as_ref()
+                                    .and_then(|l| l.has_border.get(square_y as usize))
+                                    .and_then(|row| row.get(square_x as usize))
+                                    .copied()
+                                    .unwrap_or(false)
                             };
 
                             let is_base = if pointing_down {
@@ -379,7 +387,12 @@ fn create_image_from_binary_data(
                             let is_border = is_base || is_tip || is_left_edge || is_right_edge;
                             let draw = border_thickness == 0.0 || !is_border;
                             if draw {
-                                img.put_pixel(px, py, rgba);
+                                let pixel = if horizon_highlighted {
+                                    image::Rgba([255u8, 0, 0, rgba[3]])
+                                } else {
+                                    rgba
+                                };
+                                img.put_pixel(px, py, pixel);
                             }
                         }
                     }

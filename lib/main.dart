@@ -68,6 +68,9 @@ class _MyHomePageState extends State<MyHomePage>
   final TextEditingController _heightRatioController = TextEditingController(
     text: '13',
   );
+  final TextEditingController _horizonSeedController = TextEditingController(
+    text: (DateTime.now().millisecondsSinceEpoch ~/ 1000).toString(),
+  );
   StreamSubscription<RustSignalPack<GeneratedImage>>? _generatedImageSub;
   StreamSubscription<RustSignalPack<DecodeResult>>? _decodeResultSub;
   Uint8List? _latestImage;
@@ -213,6 +216,7 @@ class _MyHomePageState extends State<MyHomePage>
       payloadType: _selectedPayloadType,
       fgColor: _fgColor.withAlpha(255).toARGB32(),
       bgColor: effectiveBg.toARGB32(),
+      horizonSeed: Uint64(BigInt.from(int.tryParse(_horizonSeedController.text.trim()) ?? 0)),
     ).sendSignalToRust();
   }
 
@@ -637,8 +641,53 @@ class _MyHomePageState extends State<MyHomePage>
                         _sendTextToRust();
                       }
                     },
-                  ),
+                   ),
                   const SizedBox(height: 16),
+                  if (_selectedStyle == 2) ...[
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: _horizonSeedController,
+                              keyboardType: TextInputType.number,
+                              decoration: const InputDecoration(
+                                labelText: 'Horizon seed',
+                                hintText: 'Leave empty for current time',
+                                border: OutlineInputBorder(),
+                              ),
+                              onChanged: (_) {
+                                if (_textController.text.trim().isNotEmpty) {
+                                  _sendTextToRust();
+                                }
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          IconButton(
+                            tooltip: 'Randomize seed',
+                            icon: const Icon(Icons.shuffle),
+                            onPressed: () {
+                              final rng = Random();
+                              // nextInt max is 2^32, so build 10 digits from two calls.
+                              // High part: 1–9, low part: 0–999999999 (9 digits zero-padded).
+                              final high = 1 + rng.nextInt(9);
+                              final low = rng.nextInt(1000000000);
+                              final seed = high * 1000000000 + low;
+                              setState(() {
+                                _horizonSeedController.text = seed.toString();
+                              });
+                              if (_textController.text.trim().isNotEmpty) {
+                                _sendTextToRust();
+                              }
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                  ],
                   // Color pickers
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
@@ -691,8 +740,8 @@ class _MyHomePageState extends State<MyHomePage>
                       onPressed: _downloadImage,
                       icon: const Icon(Icons.download),
                       label: const Text('Download Image'),
-                    ),
-                    const SizedBox(height: 16),
+                  ),
+                  const SizedBox(height: 16),
                     // Image preview with zoom and pan
                     Listener(
                       onPointerSignal: (event) {
@@ -832,6 +881,7 @@ class _MyHomePageState extends State<MyHomePage>
     _textController.dispose();
     _widthRatioController.dispose();
     _heightRatioController.dispose();
+    _horizonSeedController.dispose();
     super.dispose();
   }
 }

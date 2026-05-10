@@ -34,7 +34,7 @@ impl Notifiable<SmallText> for GenerationActor {
         debug_print!("Received text: {}", msg.text);
 
         let style = tricode::ImageStyle::from_u32(msg.style);
-        let result = tricode::generate_image_debug(&msg.text, &msg.payload_type, msg.width_ratio, msg.height_ratio, style, msg.fg_color, msg.bg_color);
+        let result = tricode::generate_image_debug(&msg.text, &msg.payload_type, msg.width_ratio, msg.height_ratio, style, msg.fg_color, msg.bg_color, msg.horizon_seed);
         if let Some(debug) = result {
             if !debug.png_bytes.is_empty() {
                 GeneratedImage {
