@@ -50,9 +50,9 @@ pub struct DecodeResult {
 pub struct GeneratedImage {
     pub png_bytes: Vec<u8>,
     // debug info
-    pub encoded_bytes: u32,   // bytes after Reed-Solomon encoding
+    pub encoded_bytes: u32, // bytes after Reed-Solomon encoding
     pub grid_rows: u32,
     pub grid_columns: u32,
-    pub data_bits_used: u32,  // bits written from encoded data
-    pub padding_bits: u32,    // zero-fill bits to complete the grid
+    pub data_bits_used: u32, // bits written from encoded data
+    pub padding_bits: u32,   // zero-fill bits to complete the grid
 }

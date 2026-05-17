@@ -2,11 +2,11 @@
 //! To build a solid app, avoid communicating by sharing memory.
 //! Focus on message passing instead.
 
-mod generation;
 mod decode;
+mod generation;
 
-use generation::GenerationActor;
 use decode::DecodeActor;
+use generation::GenerationActor;
 use messages::prelude::Context;
 use tokio::spawn;
 

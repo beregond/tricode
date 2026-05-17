@@ -25,7 +25,7 @@ impl DecodeActor {
 impl Notifiable<ImageBytes> for DecodeActor {
     async fn notify(&mut self, msg: ImageBytes, _: &Context<Self>) {
         debug_print!("Received {} bytes to decode", msg.bytes.len());
-        
+
         // Decode the image using the tricode crate
         let signal = match tricode::decode_image(&msg.bytes) {
             Ok(debug) => DecodeResult {
@@ -60,7 +60,7 @@ impl Notifiable<ImageBytes> for DecodeActor {
                 }
             }
         };
-        
+
         signal.send_signal_to_dart();
     }
 }

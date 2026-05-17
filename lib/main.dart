@@ -12,6 +12,7 @@ import 'package:rinf/rinf.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:super_clipboard/super_clipboard.dart';
 
 import 'src/bindings/bindings.dart';
 
@@ -71,6 +72,7 @@ class _MyHomePageState extends State<MyHomePage>
   final TextEditingController _horizonSeedController = TextEditingController(
     text: (DateTime.now().millisecondsSinceEpoch ~/ 1000).toString(),
   );
+  Timer? _seedDebounce;
   StreamSubscription<RustSignalPack<GeneratedImage>>? _generatedImageSub;
   StreamSubscription<RustSignalPack<DecodeResult>>? _decodeResultSub;
   Uint8List? _latestImage;
@@ -216,7 +218,9 @@ class _MyHomePageState extends State<MyHomePage>
       payloadType: _selectedPayloadType,
       fgColor: _fgColor.withAlpha(255).toARGB32(),
       bgColor: effectiveBg.toARGB32(),
-      horizonSeed: Uint64(BigInt.from(int.tryParse(_horizonSeedController.text.trim()) ?? 0)),
+      horizonSeed: Uint64(
+        BigInt.from(int.tryParse(_horizonSeedController.text.trim()) ?? 0),
+      ),
     ).sendSignalToRust();
   }
 
@@ -325,6 +329,146 @@ class _MyHomePageState extends State<MyHomePage>
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('Error saving image: $e')));
+      }
+    }
+  }
+
+  Future<void> _copyImageToClipboard() async {
+    if (_latestImage == null) return;
+
+    try {
+      final clipboard = SystemClipboard.instance;
+      if (clipboard == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Clipboard not available on this platform'),
+            ),
+          );
+        }
+        return;
+      }
+
+      final item = DataWriterItem();
+      item.add(Formats.png(_latestImage!));
+
+      await clipboard.write([item]);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Image copied to clipboard')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error copying to clipboard: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _downloadAnnotatedImage(DecodeResult debug) async {
+    if (debug.annotatedImage.isEmpty) return;
+
+    try {
+      final timestamp = DateTime.now()
+          .toIso8601String()
+          .replaceAll(':', '-')
+          .split('.')[0];
+      final defaultName = 'annotated_image_$timestamp.png';
+
+      if (Platform.isAndroid || Platform.isIOS) {
+        final directory = Platform.isAndroid
+            ? await getExternalStorageDirectory()
+            : await getApplicationDocumentsDirectory();
+
+        if (directory == null) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Could not access storage directory'),
+              ),
+            );
+          }
+          return;
+        }
+
+        final filePath = '${directory.path}/$defaultName';
+        final file = File(filePath);
+        await file.writeAsBytes(debug.annotatedImage);
+
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('Image saved to: $filePath')));
+        }
+      } else {
+        final filePath = await getSaveLocation(
+          suggestedName: defaultName,
+          acceptedTypeGroups: [
+            const XTypeGroup(label: 'PNG Images', extensions: ['png']),
+          ],
+        );
+
+        if (filePath == null) {
+          return;
+        }
+
+        final file = XFile.fromData(
+          Uint8List.fromList(debug.annotatedImage),
+          mimeType: 'image/png',
+          name: defaultName,
+        );
+
+        await file.saveTo(filePath.path);
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Image saved to: ${filePath.path}')),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error saving image: $e')));
+      }
+    }
+  }
+
+  Future<void> _copyAnnotatedImageToClipboard(DecodeResult debug) async {
+    if (debug.annotatedImage.isEmpty) return;
+
+    try {
+      final clipboard = SystemClipboard.instance;
+      if (clipboard == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Clipboard not available on this platform'),
+            ),
+          );
+        }
+        return;
+      }
+
+      final item = DataWriterItem();
+      item.add(Formats.png(Uint8List.fromList(debug.annotatedImage)));
+
+      await clipboard.write([item]);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Image copied to clipboard')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error copying to clipboard: $e')),
+        );
       }
     }
   }
@@ -514,6 +658,26 @@ class _MyHomePageState extends State<MyHomePage>
                             ),
                           ),
                           const SizedBox(height: 8),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              ElevatedButton.icon(
+                                onPressed: () =>
+                                    _downloadAnnotatedImage(_decodeDebug!),
+                                icon: const Icon(Icons.download),
+                                label: const Text('Download'),
+                              ),
+                              const SizedBox(width: 12),
+                              ElevatedButton.icon(
+                                onPressed: () => _copyAnnotatedImageToClipboard(
+                                  _decodeDebug!,
+                                ),
+                                icon: const Icon(Icons.copy),
+                                label: const Text('Copy'),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
                           Container(
                             constraints: const BoxConstraints(
                               maxWidth: 400,
@@ -641,7 +805,7 @@ class _MyHomePageState extends State<MyHomePage>
                         _sendTextToRust();
                       }
                     },
-                   ),
+                  ),
                   const SizedBox(height: 16),
                   if (_selectedStyle == 2) ...[
                     Padding(
@@ -658,9 +822,17 @@ class _MyHomePageState extends State<MyHomePage>
                                 border: OutlineInputBorder(),
                               ),
                               onChanged: (_) {
-                                if (_textController.text.trim().isNotEmpty) {
-                                  _sendTextToRust();
-                                }
+                                _seedDebounce?.cancel();
+                                _seedDebounce = Timer(
+                                  const Duration(milliseconds: 500),
+                                  () {
+                                    if (_textController.text
+                                        .trim()
+                                        .isNotEmpty) {
+                                      _sendTextToRust();
+                                    }
+                                  },
+                                );
                               },
                             ),
                           ),
@@ -736,12 +908,23 @@ class _MyHomePageState extends State<MyHomePage>
                     const SizedBox(height: 20),
                   ] else if (_latestImage != null) ...[
                     const Divider(height: 40, thickness: 1),
-                    ElevatedButton.icon(
-                      onPressed: _downloadImage,
-                      icon: const Icon(Icons.download),
-                      label: const Text('Download Image'),
-                  ),
-                  const SizedBox(height: 16),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        ElevatedButton.icon(
+                          onPressed: _downloadImage,
+                          icon: const Icon(Icons.download),
+                          label: const Text('Download Image'),
+                        ),
+                        const SizedBox(width: 12),
+                        ElevatedButton.icon(
+                          onPressed: _copyImageToClipboard,
+                          icon: const Icon(Icons.copy),
+                          label: const Text('Copy to Clipboard'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
                     // Image preview with zoom and pan
                     Listener(
                       onPointerSignal: (event) {
@@ -882,6 +1065,7 @@ class _MyHomePageState extends State<MyHomePage>
     _widthRatioController.dispose();
     _heightRatioController.dispose();
     _horizonSeedController.dispose();
+    _seedDebounce?.cancel();
     super.dispose();
   }
 }

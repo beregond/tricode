@@ -51,8 +51,7 @@ pub fn unpack_payload(bytes: &[u8]) -> Result<(String, String), String> {
     // return the JSON representation so the caller still gets something useful.
     let mut de2 = rmp_serde::Deserializer::new(bytes);
     if let Ok(json_val) = serde_json::Value::deserialize(&mut de2) {
-        let json_str = serde_json::to_string(&json_val)
-            .unwrap_or_else(|_| json_val.to_string());
+        let json_str = serde_json::to_string(&json_val).unwrap_or_else(|_| json_val.to_string());
         return Ok(("plain".to_string(), json_str));
     }
 
@@ -88,25 +87,25 @@ impl ImageStyle {
     }
 }
 
-/// Per-triangle border decision for the [`ImageStyle::Horizon`] style.
+/// Per-triangle group assignment for the [`ImageStyle::Horizon`] style.
 ///
-/// `has_border[square_y][square_x]` is `true` when that triangle should be
-/// drawn *without* a border gap (i.e. filled edge-to-edge like `Stain`) and
-/// `false` when it should keep the 1-pixel gap (like `Tiles`).
-///
-/// Having a dedicated struct here gives us a single place to swap the
-/// generation algorithm later (e.g. noise, rules, etc.) without touching the
-/// renderer.
+/// Connected regions of foreground (bit=1) triangles are flood-filled into
+/// groups.  Singletons (groups of exactly one triangle) are excluded and
+/// stored as `None`.  Each multi-triangle group gets an index that the
+/// renderer maps to a cycling palette of colours.
 #[derive(Debug, Clone)]
 pub struct HorizonLayout {
-    /// `rows × cols` boolean grid; `true` = draw border (Stain-like).
-    pub has_border: Vec<Vec<bool>>,
+    /// `rows × cols` grid; `Some(group_id)` for grouped triangles, `None` otherwise.
+    pub group_id: Vec<Vec<Option<usize>>>,
 }
 
 impl HorizonLayout {
-    /// Generate a layout for a grid of `rows` × `cols` triangles driven by
-    /// `seed`.  Pass `0` to use the current unix-time seconds as the seed.
-    pub fn from_seed(rows: u32, cols: u32, seed: u64) -> Self {
+    /// Build the layout from the encoded data and grid dimensions.
+    ///
+    /// `seed` is used to randomly select which foreground triangles to include
+    /// in groups (coin-flip per triangle).  Pass `0` to use the current
+    /// unix-time seconds as the seed.
+    pub fn from_seed(rows: u32, cols: u32, seed: u64, encoded_data: &[u8]) -> Self {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         use std::time::SystemTime;
@@ -123,19 +122,210 @@ impl HorizonLayout {
         let mut hasher = DefaultHasher::new();
         effective_seed.hash(&mut hasher);
 
-        let mut has_border = Vec::with_capacity(rows as usize);
-        for row in 0..rows {
-            let mut row_vec = Vec::with_capacity(cols as usize);
-            for col in 0..cols {
-                row.hash(&mut hasher);
-                col.hash(&mut hasher);
-                // Use the low bit of the hash as a coin flip.
-                row_vec.push(hasher.finish() & 1 == 0);
+        // --- Step 1: reconstruct which cells are foreground (bit == 1) ---
+        // This mirrors the bit-extraction logic in create_image_from_binary_data.
+        let mut is_fg = vec![vec![false; cols as usize]; rows as usize];
+        let mut bit_index: usize = 0;
+        for row in 0..rows as usize {
+            for col in 0..cols as usize {
+                let is_first_row = row == 0;
+                let is_last_row = row == rows as usize - 1;
+                let is_first_col = col == 0;
+                let is_second_col = col == 1;
+                let is_before_last_col = col == cols as usize - 2;
+                let is_last_col = col == cols as usize - 1;
+
+                let bit = if (is_first_row || is_last_row) && (is_first_col || is_last_col) {
+                    1u8
+                } else if (is_first_row || is_last_row) && (is_second_col || is_before_last_col) {
+                    0u8
+                } else {
+                    let byte_index = bit_index / 8;
+                    let bit_val = if byte_index < encoded_data.len() {
+                        let bit_offset = 7 - (bit_index % 8);
+                        (encoded_data[byte_index] >> bit_offset) & 1
+                    } else {
+                        0
+                    };
+                    bit_index += 1;
+                    bit_val
+                };
+                is_fg[row][col] = bit == 1;
             }
-            has_border.push(row_vec);
         }
 
-        Self { has_border }
+        // --- Step 2: select which foreground cells are "candidates" ---
+        // Use the low 2 bits of the hash: candidate unless both bits are set,
+        // giving a 75% selection rate so groups form more readily.
+        let mut candidate = vec![vec![false; cols as usize]; rows as usize];
+        for row in 0..rows as usize {
+            for col in 0..cols as usize {
+                if is_fg[row][col] {
+                    row.hash(&mut hasher);
+                    col.hash(&mut hasher);
+                    candidate[row][col] = hasher.finish() & 3 != 3;
+                }
+            }
+        }
+
+        // --- Step 3: flood-fill connected candidates into groups ---
+        use std::collections::VecDeque;
+
+        let neighbours = |row: usize, col: usize| -> Vec<(usize, usize)> {
+            let pd = (col % 2 == 0) ^ (row % 2 == 1);
+            let mut nb = Vec::with_capacity(3);
+            if col > 0 {
+                nb.push((row, col - 1));
+            }
+            if col + 1 < cols as usize {
+                nb.push((row, col + 1));
+            }
+            if pd && row > 0 {
+                nb.push((row - 1, col));
+            }
+            if !pd && row + 1 < rows as usize {
+                nb.push((row + 1, col));
+            }
+            nb
+        };
+
+        let mut visited = vec![vec![false; cols as usize]; rows as usize];
+        let mut bfs_groups: Vec<Vec<(usize, usize)>> = Vec::new();
+
+        for start_row in 0..rows as usize {
+            for start_col in 0..cols as usize {
+                if !candidate[start_row][start_col] || visited[start_row][start_col] {
+                    continue;
+                }
+                let mut members = Vec::new();
+                let mut queue = VecDeque::new();
+                queue.push_back((start_row, start_col));
+                visited[start_row][start_col] = true;
+                while let Some((r, c)) = queue.pop_front() {
+                    members.push((r, c));
+                    for (nr, nc) in neighbours(r, c) {
+                        if candidate[nr][nc] && !visited[nr][nc] {
+                            visited[nr][nc] = true;
+                            queue.push_back((nr, nc));
+                        }
+                    }
+                }
+                bfs_groups.push(members);
+            }
+        }
+
+        // --- Step 3.5: split each BFS group into diagonal lane sub-groups ---
+        //
+        // For every member of a BFS group compute its eastern and western lane
+        // index.  Both lane families produce candidate sub-groups.  Since each
+        // triangle can only belong to one final sub-group we pick greedily:
+        // sort all candidate lane-groups (across both families) by descending
+        // size, then claim members first-come-first-served.
+        //
+        // After assignment, a claimed sub-group may be internally disconnected
+        // (some members were taken by earlier, larger groups) so we split it
+        // again by adjacency with a second BFS pass.
+
+        let mut groups: Vec<Vec<(usize, usize)>> = Vec::new();
+
+        for bfs_group in &bfs_groups {
+            // Build lane buckets for both families
+            let mut eastern_lanes: std::collections::HashMap<usize, Vec<(usize, usize)>> =
+                std::collections::HashMap::new();
+            let mut western_lanes: std::collections::HashMap<isize, Vec<(usize, usize)>> =
+                std::collections::HashMap::new();
+
+            for &(r, c) in bfs_group {
+                let col_coef_eastern = match r {
+                    x if x % 2 == 0 => (c + 1) & !1,
+                    _ => c & !1,
+                };
+                let col_coef_western = match r {
+                    x if x % 2 == 1 => (c + 1) & !1,
+                    _ => c & !1,
+                };
+                let row_coef = (r / 2) * 2;
+
+                let eastern_lane = r * 2 - row_coef + col_coef_eastern;
+                let western_lane = col_coef_western as isize - (r as isize * 2 - row_coef as isize);
+
+                eastern_lanes.entry(eastern_lane).or_default().push((r, c));
+                western_lanes.entry(western_lane).or_default().push((r, c));
+            }
+
+            // Collect all candidate lane-groups, tag with size for sorting
+            let mut candidates: Vec<Vec<(usize, usize)>> = eastern_lanes
+                .into_values()
+                .chain(western_lanes.into_values())
+                .collect();
+
+            // Largest first so big groups claim members before small ones
+            candidates.sort_unstable_by(|a, b| b.len().cmp(&a.len()));
+
+            // Claim members greedily; track which cells are already taken
+            let mut taken = vec![vec![false; cols as usize]; rows as usize];
+            let mut claimed: Vec<Vec<(usize, usize)>> = Vec::new();
+
+            for candidate in candidates {
+                let free: Vec<(usize, usize)> = candidate
+                    .into_iter()
+                    .filter(|&(r, c)| !taken[r][c])
+                    .collect();
+                if free.is_empty() {
+                    continue;
+                }
+                for &(r, c) in &free {
+                    taken[r][c] = true;
+                }
+                claimed.push(free);
+            }
+
+            // Split each claimed sub-group by adjacency with a second BFS pass.
+            // After greedy claiming, a sub-group may be internally disconnected.
+            for sub_group in claimed {
+                // Build a set for fast lookup
+                let member_set: std::collections::HashSet<(usize, usize)> =
+                    sub_group.iter().copied().collect();
+                let mut visited_adjacency = vec![vec![false; cols as usize]; rows as usize];
+
+                // BFS over this sub-group to find adjacency-connected components
+                for &start in &sub_group {
+                    if visited_adjacency[start.0][start.1] {
+                        continue;
+                    }
+                    let mut component = Vec::new();
+                    let mut queue = VecDeque::new();
+                    queue.push_back(start);
+                    visited_adjacency[start.0][start.1] = true;
+
+                    while let Some((r, c)) = queue.pop_front() {
+                        component.push((r, c));
+                        for (nr, nc) in neighbours(r, c) {
+                            if member_set.contains(&(nr, nc)) && !visited_adjacency[nr][nc] {
+                                visited_adjacency[nr][nc] = true;
+                                queue.push_back((nr, nc));
+                            }
+                        }
+                    }
+                    groups.push(component);
+                }
+            }
+        }
+
+        // --- Step 4: assign group IDs, skip singletons ---
+        let mut group_id: Vec<Vec<Option<usize>>> = vec![vec![None; cols as usize]; rows as usize];
+        let mut colour_index: usize = 0;
+        for members in &groups {
+            if members.len() < 2 {
+                continue; // singleton — leave as None
+            }
+            for &(r, c) in members {
+                group_id[r][c] = Some(colour_index);
+            }
+            colour_index += 1;
+        }
+
+        Self { group_id }
     }
 }
 
@@ -155,8 +345,8 @@ pub struct GenerateDebug {
 fn argb_to_rgba(argb: u32, force_opaque: bool) -> Rgba<u8> {
     let a = ((argb >> 24) & 0xFF) as u8;
     let r = ((argb >> 16) & 0xFF) as u8;
-    let g = ((argb >>  8) & 0xFF) as u8;
-    let b = ( argb        & 0xFF) as u8;
+    let g = ((argb >> 8) & 0xFF) as u8;
+    let b = (argb & 0xFF) as u8;
     Rgba([r, g, b, if force_opaque { 255 } else { a }])
 }
 
@@ -265,6 +455,7 @@ fn create_image_from_binary_data(
             height_squares,
             width_squares,
             horizon_seed,
+            encoded_data,
         ))
     } else {
         horizon_layout // None for Tiles / Stain
@@ -351,48 +542,122 @@ fn create_image_from_binary_data(
                             let py = padding_y + square_y * pixels_per_bit_height + dy;
 
                             // Check if this pixel is on a border
-                            // For Horizon, all triangles share the same thick border (3.0).
-                            // Triangles flagged has_border=true are drawn in red instead of
-                            // their normal colour — no size difference, just a colour change.
                             let border_thickness: f64 = match style {
                                 ImageStyle::Horizon => 3.0,
                                 ImageStyle::Tiles => 1.0,
                                 ImageStyle::Stain => 0.0,
                             };
 
-                            let horizon_highlighted = matches!(style, ImageStyle::Horizon) && {
-                                horizon_layout
-                                    .as_ref()
-                                    .and_then(|l| l.has_border.get(square_y as usize))
-                                    .and_then(|row| row.get(square_x as usize))
-                                    .copied()
-                                    .unwrap_or(false)
+                            // Determine which edge this pixel belongs to (mutually exclusive)
+                            // Priority: tip > base > sides
+                            let dist_from_center = (x - center_x).abs();
+                            let edge_distance = half_width - dist_from_center;
+
+                            let is_tip_region = if pointing_down {
+                                dy >= pixels_per_bit_height - border_thickness as u32
+                                    && edge_distance > border_thickness
+                            } else {
+                                dy < border_thickness as u32 && edge_distance > border_thickness
                             };
 
-                            let is_base = if pointing_down {
-                                dy < border_thickness as u32
+                            let is_base_region = if pointing_down {
+                                dy < border_thickness as u32 && edge_distance > border_thickness
                             } else {
                                 dy >= pixels_per_bit_height - border_thickness as u32
+                                    && edge_distance > border_thickness
                             };
-                            let is_tip = if pointing_down {
-                                dy >= pixels_per_bit_height - border_thickness as u32
-                            } else {
-                                dy < border_thickness as u32
-                            };
-                            let is_left_edge =
-                                (x - center_x).abs() >= half_width - (border_thickness * 0.5);
-                            let is_right_edge =
-                                (x - center_x).abs() >= half_width - (border_thickness * 1.5);
 
-                            let is_border = is_base || is_tip || is_left_edge || is_right_edge;
-                            let draw = border_thickness == 0.0 || !is_border;
-                            if draw {
-                                let pixel = if horizon_highlighted {
-                                    image::Rgba([255u8, 0, 0, rgba[3]])
-                                } else {
-                                    rgba
-                                };
-                                img.put_pixel(px, py, pixel);
+                            let is_side_region = edge_distance <= border_thickness;
+
+                            // Assign to exactly one edge with priority
+                            let (is_on_tip, is_on_base, is_on_side) = if is_tip_region {
+                                (true, false, false)
+                            } else if is_base_region {
+                                (false, true, false)
+                            } else if is_side_region {
+                                (false, false, true)
+                            } else {
+                                (false, false, false)
+                            };
+
+                            let is_border = is_on_base || is_on_tip || is_on_side;
+
+                            // Determine if we should draw this pixel
+                            let should_draw = match style {
+                                ImageStyle::Horizon => {
+                                    if !is_border {
+                                        // Not on border, always draw
+                                        true
+                                    } else {
+                                        // On border: check if we should connect to neighbor in same group
+                                        let current_group = horizon_layout
+                                            .as_ref()
+                                            .and_then(|l| l.group_id.get(square_y as usize))
+                                            .and_then(|row| row.get(square_x as usize))
+                                            .and_then(|cell| *cell);
+
+                                        current_group
+                                            .map(|gid| {
+                                                let check_neighbor =
+                                                    |neighbor_row: usize, neighbor_col: usize| -> bool {
+                                                        horizon_layout
+                                                            .as_ref()
+                                                            .and_then(|l| l.group_id.get(neighbor_row))
+                                                            .and_then(|row| row.get(neighbor_col))
+                                                            .and_then(|cell| *cell)
+                                                            == Some(gid)
+                                                    };
+
+                                                // pd determines which vertical neighbor this triangle has
+                                                let pd = (square_x % 2 == 0) ^ (square_y % 2 == 1);
+
+                                                // Check only the appropriate neighbor for this edge
+                                                if is_on_base {
+                                                    (pointing_down
+                                                        && pd
+                                                        && square_y > 0
+                                                        && check_neighbor(
+                                                            square_y as usize - 1,
+                                                            square_x as usize,
+                                                        ))
+                                                        || (!pointing_down
+                                                            && !pd
+                                                            && square_y < height_squares - 1
+                                                            && check_neighbor(
+                                                                square_y as usize + 1,
+                                                                square_x as usize,
+                                                            ))
+                                                } else if is_on_side {
+                                                    if x < center_x {
+                                                        // Left side
+                                                        square_x > 0
+                                                            && check_neighbor(
+                                                                square_y as usize,
+                                                                square_x as usize - 1,
+                                                            )
+                                                    } else if x > center_x {
+                                                        // Right side
+                                                        square_x < width_squares - 1
+                                                            && check_neighbor(
+                                                                square_y as usize,
+                                                                square_x as usize + 1,
+                                                            )
+                                                    } else {
+                                                        false // Exactly on center line
+                                                    }
+                                                } else {
+                                                    // is_on_tip - tips never connect
+                                                    false
+                                                }
+                                            })
+                                            .unwrap_or(false)
+                                    }
+                                }
+                                _ => border_thickness == 0.0 || !is_border,
+                            };
+
+                            if should_draw {
+                                img.put_pixel(px, py, rgba);
                             }
                         }
                     }
