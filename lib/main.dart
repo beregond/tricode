@@ -259,6 +259,79 @@ class _MyHomePageState extends State<MyHomePage>
     }
   }
 
+  Future<void> _pasteAndDecodeImage() async {
+    try {
+      final clipboard = SystemClipboard.instance;
+      if (clipboard == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Clipboard not available on this platform'),
+            ),
+          );
+        }
+        return;
+      }
+
+      final reader = await clipboard.read();
+
+      // Try PNG first
+      Uint8List? imageBytes;
+      if (reader.canProvide(Formats.png)) {
+        final completer = Completer<Uint8List?>();
+        reader.getFile(Formats.png, (file) async {
+          try {
+            final bytes = await file.readAll();
+            completer.complete(bytes);
+          } catch (e) {
+            completer.complete(null);
+          }
+        });
+        imageBytes = await completer.future;
+      }
+
+      // If no PNG, try JPEG
+      if (imageBytes == null && reader.canProvide(Formats.jpeg)) {
+        final completer = Completer<Uint8List?>();
+        reader.getFile(Formats.jpeg, (file) async {
+          try {
+            final bytes = await file.readAll();
+            completer.complete(bytes);
+          } catch (e) {
+            completer.complete(null);
+          }
+        });
+        imageBytes = await completer.future;
+      }
+
+      if (imageBytes == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('No image found in clipboard')),
+          );
+        }
+        return;
+      }
+
+      setState(() {
+        _isDecoding = true;
+        _decodeSuccess = null;
+        _decodeText = null;
+      });
+
+      ImageBytes(bytes: imageBytes).sendSignalToRust();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error pasting from clipboard: $e')),
+        );
+        setState(() {
+          _isDecoding = false;
+        });
+      }
+    }
+  }
+
   Future<void> _downloadImage() async {
     if (_latestImage == null) return;
 
@@ -546,10 +619,21 @@ class _MyHomePageState extends State<MyHomePage>
                         ),
                       ),
                       const SizedBox(height: 20),
-                      ElevatedButton.icon(
-                        onPressed: _pickAndDecodeImage,
-                        icon: const Icon(Icons.file_upload),
-                        label: const Text('Select Image File'),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          ElevatedButton.icon(
+                            onPressed: _pickAndDecodeImage,
+                            icon: const Icon(Icons.file_upload),
+                            label: const Text('Select Image File'),
+                          ),
+                          const SizedBox(width: 16),
+                          ElevatedButton.icon(
+                            onPressed: _pasteAndDecodeImage,
+                            icon: const Icon(Icons.content_paste),
+                            label: const Text('Paste from Clipboard'),
+                          ),
+                        ],
                       ),
                       const SizedBox(height: 20),
                       if (_isDecoding) ...[

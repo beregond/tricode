@@ -548,110 +548,58 @@ fn create_image_from_binary_data(
                                 ImageStyle::Stain => 0.0,
                             };
 
-                            // Determine which edge this pixel belongs to (mutually exclusive)
-                            // Priority: tip > base > sides
-                            let dist_from_center = (x - center_x).abs();
-                            let edge_distance = half_width - dist_from_center;
-
                             let is_tip_region = if pointing_down {
                                 dy >= pixels_per_bit_height - border_thickness as u32
-                                    && edge_distance > border_thickness
                             } else {
-                                dy < border_thickness as u32 && edge_distance > border_thickness
+                                dy < border_thickness as u32
+                            };
+
+                            // Tip base: transition region adjacent to tip
+                            // Height is border_thickness rows, between tip and main body
+                            let is_tip_base_region = if pointing_down {
+                                dy >= pixels_per_bit_height - (2.0 * border_thickness) as u32
+                                    && dy < pixels_per_bit_height - border_thickness as u32
+                            } else {
+                                dy >= border_thickness as u32
+                                    && dy < (2.0 * border_thickness) as u32
                             };
 
                             let is_base_region = if pointing_down {
-                                dy < border_thickness as u32 && edge_distance > border_thickness
+                                dy < border_thickness as u32
                             } else {
                                 dy >= pixels_per_bit_height - border_thickness as u32
-                                    && edge_distance > border_thickness
                             };
 
-                            let is_side_region = edge_distance <= border_thickness;
+                            // For tip_base region, determine which sides it belongs to
+                            // Left edge is at (center_x - half_width), right edge at (center_x + half_width)
+                            // Check if within border_thickness of each edge
+                            let left_edge = center_x - half_width;
+                            let right_edge = center_x + half_width;
+                            let is_left_border = x - left_edge <= border_thickness;
+                            let is_right_border = right_edge - x <= border_thickness;
 
-                            // Assign to exactly one edge with priority
-                            let (is_on_tip, is_on_base, is_on_side) = if is_tip_region {
-                                (true, false, false)
-                            } else if is_base_region {
-                                (false, true, false)
-                            } else if is_side_region {
-                                (false, false, true)
-                            } else {
-                                (false, false, false)
-                            };
+                            let is_tip_base_left_only =
+                                is_tip_base_region && is_left_border && !is_right_border;
+                            let is_tip_base_right_only =
+                                is_tip_base_region && is_right_border && !is_left_border;
+                            let is_tip_base_both =
+                                is_tip_base_region && is_left_border && is_right_border;
 
-                            let is_border = is_on_base || is_on_tip || is_on_side;
+                            let is_border = is_base_region || is_left_border || is_right_border;
+
+                            // is_tip_region - A
+                            // is_tip_base_left_only - B
+                            // is_tip_base_both - C
+                            // is_tip_base_right_only - D
 
                             // Determine if we should draw this pixel
                             let should_draw = match style {
                                 ImageStyle::Horizon => {
-                                    if !is_border {
-                                        // Not on border, always draw
-                                        true
-                                    } else {
-                                        // On border: check if we should connect to neighbor in same group
-                                        let current_group = horizon_layout
-                                            .as_ref()
-                                            .and_then(|l| l.group_id.get(square_y as usize))
-                                            .and_then(|row| row.get(square_x as usize))
-                                            .and_then(|cell| *cell);
-
-                                        current_group
-                                            .map(|gid| {
-                                                let check_neighbor =
-                                                    |neighbor_row: usize, neighbor_col: usize| -> bool {
-                                                        horizon_layout
-                                                            .as_ref()
-                                                            .and_then(|l| l.group_id.get(neighbor_row))
-                                                            .and_then(|row| row.get(neighbor_col))
-                                                            .and_then(|cell| *cell)
-                                                            == Some(gid)
-                                                    };
-
-                                                // pd determines which vertical neighbor this triangle has
-                                                let pd = (square_x % 2 == 0) ^ (square_y % 2 == 1);
-
-                                                // Check only the appropriate neighbor for this edge
-                                                if is_on_base {
-                                                    (pointing_down
-                                                        && pd
-                                                        && square_y > 0
-                                                        && check_neighbor(
-                                                            square_y as usize - 1,
-                                                            square_x as usize,
-                                                        ))
-                                                        || (!pointing_down
-                                                            && !pd
-                                                            && square_y < height_squares - 1
-                                                            && check_neighbor(
-                                                                square_y as usize + 1,
-                                                                square_x as usize,
-                                                            ))
-                                                } else if is_on_side {
-                                                    if x < center_x {
-                                                        // Left side
-                                                        square_x > 0
-                                                            && check_neighbor(
-                                                                square_y as usize,
-                                                                square_x as usize - 1,
-                                                            )
-                                                    } else if x > center_x {
-                                                        // Right side
-                                                        square_x < width_squares - 1
-                                                            && check_neighbor(
-                                                                square_y as usize,
-                                                                square_x as usize + 1,
-                                                            )
-                                                    } else {
-                                                        false // Exactly on center line
-                                                    }
-                                                } else {
-                                                    // is_on_tip - tips never connect
-                                                    false
-                                                }
-                                            })
-                                            .unwrap_or(false)
-                                    }
+                                    !is_border
+                                        || is_tip_region
+                                        || is_tip_base_right_only
+                                        || is_tip_base_left_only
+                                        || is_tip_base_both
                                 }
                                 _ => border_thickness == 0.0 || !is_border,
                             };
