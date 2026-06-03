@@ -653,6 +653,98 @@ impl NeighborInfo {
     }
 }
 
+/// Applies a 2D bitmask (tiled over the grid) to `data` via XOR.
+/// Each bit at grid position `(row, col)` is flipped when `mask[row % mask_rows][col % mask_cols] == 1`.
+fn apply_mask(data: &[u8], mask: &[&[u8]], width_squares: u32) -> Vec<u8> {
+    let mask_rows = mask.len();
+    let mask_cols = mask[0].len();
+    let mut result = data.to_vec();
+
+    for bit_pos in 0..data.len() * 8 {
+        let row = (bit_pos / width_squares as usize) % mask_rows;
+        let col = (bit_pos % width_squares as usize) % mask_cols;
+
+        if mask[row][col] == 1 {
+            let byte_idx = bit_pos / 8;
+            let bit_offset = 7 - (bit_pos % 8); // MSB first, matching renderer
+            result[byte_idx] ^= 1 << bit_offset;
+        }
+    }
+
+    result
+}
+
+/// XORs `encoded_data` with each predefined mask (tiled to cover the grid), then
+/// returns the result whose ratio of 1-bits to 0-bits is closest to 1
+/// (i.e. the most balanced bit distribution).
+fn mix_pixels(encoded_data: &[u8], width_squares: u32, _height_squares: u32) -> Vec<u8> {
+    #[rustfmt::skip]
+    let masks: &[&[&[u8]]] = &[
+        // Checkerboard (alternating per triangle)
+        &[
+            &[1, 0, 1, 0],
+            &[0, 1, 0, 1],
+            &[1, 0, 1, 0],
+            &[0, 1, 0, 1],
+        ],
+        // 2×2 blocks
+        &[
+            &[1, 1, 0, 0],
+            &[1, 1, 0, 0],
+            &[0, 0, 1, 1],
+            &[0, 0, 1, 1],
+        ],
+        // Right wave
+        &[
+            &[1, 0, 1, 1],
+            &[0, 1, 1, 0],
+            &[1, 1, 0, 1],
+            &[1, 0, 1, 1],
+        ],
+        // Left wave
+        &[
+            &[1, 1, 0, 1],
+            &[0, 1, 1, 0],
+            &[1, 0, 1, 1],
+            &[1, 1, 0, 1],
+        ],
+        // Vertical lines
+        &[
+            &[1, 0, 1, 0],
+            &[1, 0, 1, 0],
+            &[1, 0, 1, 0],
+            &[1, 0, 1, 0],
+        ],
+        // Horizontal lines
+        &[
+            &[1, 1, 1, 1],
+            &[0, 0, 0, 0],
+            &[1, 1, 1, 1],
+            &[0, 0, 0, 0],
+        ],
+        // Empty pattern, to check original data as well
+        &[
+            &[0, 0, 0, 0],
+            &[0, 0, 0, 0],
+            &[0, 0, 0, 0],
+            &[0, 0, 0, 0],
+        ],
+    ];
+
+    let total_bits = encoded_data.len() * 8;
+
+    masks
+        .iter()
+        .map(|mask| apply_mask(encoded_data, mask, width_squares))
+        .min_by_key(|mixed| {
+            let ones = mixed.iter().map(|b| b.count_ones() as i64).sum::<i64>();
+            let zeros = total_bits as i64 - ones;
+            // Minimise |ones - zeros| → ratio ones/zeros closest to 1
+            (ones - zeros).abs()
+        })
+        .unwrap_or_else(|| encoded_data.to_vec())
+}
+
 fn create_image_from_binary_data(
     encoded_data: &[u8],
     width_ratio: u32,
@@ -678,13 +770,15 @@ fn create_image_from_binary_data(
     let (width_squares, height_squares) =
         find_optimal_factors(total_bits as u32, normalized_width, normalized_height);
 
+    let data = mix_pixels(encoded_data, width_squares, height_squares);
+
     // Now that we know the grid size, build the Horizon layout if needed.
     let horizon_layout: Option<HorizonLayout> = if style == ImageStyle::Horizon {
         Some(HorizonLayout::from_seed(
             height_squares,
             width_squares,
             horizon_seed,
-            encoded_data,
+            &data,
         ))
     } else {
         None
@@ -738,9 +832,9 @@ fn create_image_from_binary_data(
             } else {
                 // Normal data bit
                 let byte_index = bit_index / 8;
-                if byte_index < encoded_data.len() {
+                if byte_index < data.len() {
                     let bit_offset = 7 - (bit_index % 8); // MSB first
-                    let bit_value = (encoded_data[byte_index] >> bit_offset) & 1;
+                    let bit_value = (data[byte_index] >> bit_offset) & 1;
                     bit_index += 1;
                     bit_value
                 } else {
