@@ -126,14 +126,16 @@ impl HorizonLayout {
         // This mirrors the bit-extraction logic in create_image_from_binary_data.
         let mut is_fg = vec![vec![false; cols as usize]; rows as usize];
         let mut bit_index: usize = 0;
-        for row in 0..rows as usize {
-            for col in 0..cols as usize {
+        let last_row = rows as usize - 1;
+        let last_col = cols as usize - 1;
+        for (row, row_cells) in is_fg.iter_mut().enumerate() {
+            for (col, cell) in row_cells.iter_mut().enumerate() {
                 let is_first_row = row == 0;
-                let is_last_row = row == rows as usize - 1;
+                let is_last_row = row == last_row;
                 let is_first_col = col == 0;
                 let is_second_col = col == 1;
-                let is_before_last_col = col == cols as usize - 2;
-                let is_last_col = col == cols as usize - 1;
+                let is_before_last_col = col == last_col - 1;
+                let is_last_col = col == last_col;
 
                 let bit = if (is_first_row || is_last_row) && (is_first_col || is_last_col) {
                     1u8
@@ -150,7 +152,7 @@ impl HorizonLayout {
                     bit_index += 1;
                     bit_val
                 };
-                is_fg[row][col] = bit == 1;
+                *cell = bit == 1;
             }
         }
 
@@ -172,7 +174,7 @@ impl HorizonLayout {
         use std::collections::VecDeque;
 
         let neighbours = |row: usize, col: usize| -> Vec<(usize, usize)> {
-            let pd = (col % 2 == 0) ^ (row % 2 == 1);
+            let pd = col.is_multiple_of(2) ^ (row % 2 == 1);
             let mut nb = Vec::with_capacity(3);
             if col > 0 {
                 nb.push((row, col - 1));
@@ -260,7 +262,7 @@ impl HorizonLayout {
                 .collect();
 
             // Largest first so big groups claim members before small ones
-            candidates.sort_unstable_by(|a, b| b.len().cmp(&a.len()));
+            candidates.sort_unstable_by_key(|b| std::cmp::Reverse(b.len()));
 
             // Claim members greedily; track which cells are already taken
             let mut taken = vec![vec![false; cols as usize]; rows as usize];
@@ -380,18 +382,21 @@ pub fn generate_image(
     .png_bytes
 }
 
+/// Parameters for [`generate_image_debug`].
+pub struct GenerateImageParams<'a> {
+    pub payload: &'a str,
+    pub payload_type: &'a str,
+    pub width_ratio: u32,
+    pub height_ratio: u32,
+    pub style: ImageStyle,
+    pub fg_color: u32,
+    pub bg_color: u32,
+    pub horizon_seed: u64,
+}
+
 /// Generates a PNG image encoding the payload text, returning full debug info.
-pub fn generate_image_debug(
-    payload: &str,
-    payload_type: &str,
-    width_ratio: u32,
-    height_ratio: u32,
-    style: ImageStyle,
-    fg_color: u32,
-    bg_color: u32,
-    horizon_seed: u64,
-) -> Option<GenerateDebug> {
-    let payload_bytes = match pack_payload(payload_type, payload) {
+pub fn generate_image_debug(params: GenerateImageParams<'_>) -> Option<GenerateDebug> {
+    let payload_bytes = match pack_payload(params.payload_type, params.payload) {
         Ok(b) => b,
         Err(_) => return None,
     };
@@ -402,18 +407,252 @@ pub fn generate_image_debug(
 
     Some(create_image_from_binary_data(
         &encoded_data,
-        width_ratio,
-        height_ratio,
-        style,
-        argb_to_rgba(fg_color, true),
-        argb_to_rgba(bg_color, false),
-        horizon_seed,
+        params.width_ratio,
+        params.height_ratio,
+        params.style,
+        argb_to_rgba(params.fg_color, true),
+        argb_to_rgba(params.bg_color, false),
+        params.horizon_seed,
     ))
 }
 
+/// For horizon style there is notation introduced, so each triangle is divided into:
+///
+/// ```text
+///                 / \
+///                /   \
+///                -----
+///              / \   / \
+///             /   \ /   \
+///            /           \
+///           /     / \     \
+///          /     /   \     \
+///         /     /     \     \
+///        /     /       \     \
+///       /     /         \     \
+///      /     /           \     \
+///     /     /             \     \
+///     ----- --------------- -----
+///   / \   /                 \   / \
+///  /   \ /                   \ /   \
+///  ----- --------------------- -----
+/// ```
+///
+/// And those regions stay in context of base (so left tip may not be left on the image, if triangle
+/// is pointing down).
+///
+/// Those region are related to surrounding triangles, the interesting X trinalge is our context:
+///
+/// ```text
+///  ------- -------
+///  \     /.\     /
+///   \   /...\   /
+///    \ /..X..\ /
+///      -------
+///      \     /
+///       \   /
+///        \ /
+/// ```
+///
 /// Creates a PNG image from binary data maintaining the specified aspect ratio.
 /// Binary data is encoded as: 0 bits = background color, 1 bits = foreground color.
 /// Each bit is represented by a 4x4 square of pixels.
+/// Holds pre-computed constants for triangle rendering, avoiding repeated calculations in loops
+struct TriangleRenderConstants {
+    w: f64,
+    center_x: f64,
+    denom: f64,
+    slope: f64,
+}
+
+impl TriangleRenderConstants {
+    fn new(pixels_per_bit_width: u32, pixels_per_bit_height: u32) -> Self {
+        let w = pixels_per_bit_width as f64;
+        let h = pixels_per_bit_height as f64;
+        Self {
+            w,
+            center_x: (w - 1.0) / 2.0,
+            denom: (h - 1.0).max(1.0),
+            slope: 2.0 * h / w,
+        }
+    }
+}
+
+/// Pre-computed corner tip positions for triangle rendering
+struct TriangleCorners {
+    left_tip_x: u32,
+    left_tip_y: u32,
+    right_tip_x: u32,
+    right_tip_y: u32,
+}
+
+impl TriangleCorners {
+    fn new(
+        pointing_down: bool,
+        pixels_per_bit_width: u32,
+        pixels_per_bit_height: u32,
+        border_thickness: f64,
+    ) -> Self {
+        if pointing_down {
+            Self {
+                left_tip_x: pixels_per_bit_width - border_thickness as u32,
+                left_tip_y: 0,
+                right_tip_x: border_thickness as u32,
+                right_tip_y: 0,
+            }
+        } else {
+            Self {
+                left_tip_x: border_thickness as u32,
+                left_tip_y: pixels_per_bit_height,
+                right_tip_x: pixels_per_bit_width - border_thickness as u32,
+                right_tip_y: pixels_per_bit_height,
+            }
+        }
+    }
+}
+
+/// Pre-computed neighbor information for Horizon style rendering
+struct NeighborInfo {
+    bottom: bool,
+    left: bool,
+    right: bool,
+}
+
+impl NeighborInfo {
+    fn compute(
+        has_group: bool,
+        pointing_down: bool,
+        square_x: u32,
+        square_y: u32,
+        width_squares: u32,
+        height_squares: u32,
+        horizon_layout: &Option<HorizonLayout>,
+    ) -> Self {
+        if !has_group {
+            return Self {
+                bottom: false,
+                left: false,
+                right: false,
+            };
+        }
+
+        let current_group = horizon_layout
+            .as_ref()
+            .and_then(|hl| hl.group_id[square_y as usize][square_x as usize]);
+
+        let bottom = Self::check_bottom_neighbor(
+            pointing_down,
+            square_y,
+            square_x,
+            height_squares,
+            current_group,
+            horizon_layout,
+        );
+
+        let left = Self::check_left_neighbor(
+            pointing_down,
+            square_x,
+            square_y,
+            width_squares,
+            current_group,
+            horizon_layout,
+        );
+
+        let right = Self::check_right_neighbor(
+            pointing_down,
+            square_x,
+            square_y,
+            width_squares,
+            current_group,
+            horizon_layout,
+        );
+
+        Self {
+            bottom,
+            left,
+            right,
+        }
+    }
+
+    fn check_bottom_neighbor(
+        pointing_down: bool,
+        square_y: u32,
+        square_x: u32,
+        height_squares: u32,
+        current_group: Option<usize>,
+        horizon_layout: &Option<HorizonLayout>,
+    ) -> bool {
+        let adjacent_y = if pointing_down {
+            if square_y == 0 {
+                return false;
+            }
+            square_y - 1
+        } else {
+            if square_y >= height_squares - 1 {
+                return false;
+            }
+            square_y + 1
+        };
+
+        horizon_layout.as_ref().is_some_and(|hl| {
+            let adjacent_group = hl.group_id[adjacent_y as usize][square_x as usize];
+            current_group.is_some() && current_group == adjacent_group
+        })
+    }
+
+    fn check_left_neighbor(
+        pointing_down: bool,
+        square_x: u32,
+        square_y: u32,
+        width_squares: u32,
+        current_group: Option<usize>,
+        horizon_layout: &Option<HorizonLayout>,
+    ) -> bool {
+        let adjacent_x = if pointing_down {
+            if square_x >= width_squares - 1 {
+                return false;
+            }
+            square_x + 1
+        } else {
+            if square_x == 0 {
+                return false;
+            }
+            square_x - 1
+        };
+
+        horizon_layout.as_ref().is_some_and(|hl| {
+            let adjacent_group = hl.group_id[square_y as usize][adjacent_x as usize];
+            current_group.is_some() && current_group == adjacent_group
+        })
+    }
+
+    fn check_right_neighbor(
+        pointing_down: bool,
+        square_x: u32,
+        square_y: u32,
+        width_squares: u32,
+        current_group: Option<usize>,
+        horizon_layout: &Option<HorizonLayout>,
+    ) -> bool {
+        let adjacent_x = if pointing_down {
+            if square_x == 0 {
+                return false;
+            }
+            square_x - 1
+        } else {
+            if square_x >= width_squares - 1 {
+                return false;
+            }
+            square_x + 1
+        };
+
+        horizon_layout.as_ref().is_some_and(|hl| {
+            let adjacent_group = hl.group_id[square_y as usize][adjacent_x as usize];
+            current_group.is_some() && current_group == adjacent_group
+        })
+    }
+}
+
 fn create_image_from_binary_data(
     encoded_data: &[u8],
     width_ratio: u32,
@@ -423,16 +662,6 @@ fn create_image_from_binary_data(
     bg: Rgba<u8>,
     horizon_seed: u64,
 ) -> GenerateDebug {
-    // Pre-compute the Horizon layout so the algorithm lives in one place and
-    // the renderer below just queries it.
-    // For non-Horizon styles this is a zero-cost no-op (empty vecs).
-    let horizon_layout: Option<HorizonLayout> = if style == ImageStyle::Horizon {
-        // We don't know the grid dimensions yet; we'll build the layout after
-        // `find_optimal_factors`. Define a small closure to defer construction.
-        None // placeholder — replaced below after grid size is known
-    } else {
-        None
-    };
     const PIXELS_PER_BIT_WIDTH: u32 = 51; // Bit box width in pixels
     let pixels_per_bit_height =
         ((PIXELS_PER_BIT_WIDTH as f64) * (3.0_f64.sqrt() / 2.0)).ceil() as u32;
@@ -458,7 +687,7 @@ fn create_image_from_binary_data(
             encoded_data,
         ))
     } else {
-        horizon_layout // None for Tiles / Stain
+        None
     };
 
     // Calculate padding
@@ -478,7 +707,17 @@ fn create_image_from_binary_data(
         *pixel = bg;
     }
 
-    // Fill image with encoded data bits (each bit as a 4x4 square)
+    // Pre-compute border thickness once
+    let border_thickness: f64 = match style {
+        ImageStyle::Horizon => 3.0,
+        ImageStyle::Tiles => 1.0,
+        ImageStyle::Stain => 0.0,
+    };
+
+    // Pre-compute triangle rendering constants once
+    let tri_constants = TriangleRenderConstants::new(PIXELS_PER_BIT_WIDTH, pixels_per_bit_height);
+
+    // Fill image with encoded data bits (each bit as a triangle)
     let mut bit_index = 0;
     for square_y in 0..height_squares {
         for square_x in 0..width_squares {
@@ -512,94 +751,150 @@ fn create_image_from_binary_data(
             // 0 = background, 1 = foreground
             let rgba = if bit == 1 { fg } else { bg };
 
-            let w = PIXELS_PER_BIT_WIDTH as f64;
-            let h = pixels_per_bit_height as f64;
-            let center_x = (w - 1.0) / 2.0;
-            let denom = (h - 1.0).max(1.0);
-
             if bit == 1 {
-                // Fill the equilateral triangle with border
+                // Determine triangle orientation once per square
                 let mut pointing_down = square_x % 2 == 0;
                 if square_y % 2 == 1 {
                     pointing_down = !pointing_down;
                 }
 
+                // Pre-compute corner tip positions once per triangle
+                let corners = TriangleCorners::new(
+                    pointing_down,
+                    PIXELS_PER_BIT_WIDTH,
+                    pixels_per_bit_height,
+                    border_thickness,
+                );
+
+                // Pre-compute neighbor info once for Horizon style
+                let neighbors = if style == ImageStyle::Horizon {
+                    let has_group = horizon_layout.as_ref().is_some_and(|hl| {
+                        hl.group_id[square_y as usize][square_x as usize].is_some()
+                    });
+                    NeighborInfo::compute(
+                        has_group,
+                        pointing_down,
+                        square_x,
+                        square_y,
+                        width_squares,
+                        height_squares,
+                        &horizon_layout,
+                    )
+                } else {
+                    NeighborInfo {
+                        bottom: false,
+                        left: false,
+                        right: false,
+                    }
+                };
+
+                // Check if we have a group for Horizon style (computed once)
+                let has_group = style == ImageStyle::Horizon
+                    && horizon_layout.as_ref().is_some_and(|hl| {
+                        hl.group_id[square_y as usize][square_x as usize].is_some()
+                    });
+
+                // Render triangle pixel by pixel
                 for dy in 0..pixels_per_bit_height {
+                    let y = dy as f64;
+                    let t = y / tri_constants.denom;
+
+                    let half_width = if pointing_down {
+                        (tri_constants.w / 2.0) * (1.0 - t)
+                    } else {
+                        (tri_constants.w / 2.0) * t
+                    };
+
+                    // Pre-compute border checks for this row
+                    let is_top_tip = if pointing_down {
+                        dy >= pixels_per_bit_height - border_thickness as u32
+                    } else {
+                        dy < border_thickness as u32
+                    };
+
+                    let is_base_region = if pointing_down {
+                        dy < border_thickness as u32
+                    } else {
+                        dy >= pixels_per_bit_height - border_thickness as u32
+                    };
+
                     for dx in 0..PIXELS_PER_BIT_WIDTH {
-                        let y = dy as f64;
                         let x = dx as f64;
-                        let t = y / denom;
 
-                        let half_width = if pointing_down {
-                            (w / 2.0) * (1.0 - t)
-                        } else {
-                            (w / 2.0) * t
-                        };
-
-                        if (x - center_x).abs() <= half_width {
+                        if (x - tri_constants.center_x).abs() <= half_width {
                             let base_x = square_x * (PIXELS_PER_BIT_WIDTH / 2);
                             let px = padding_x + base_x + dx;
                             let py = padding_y + square_y * pixels_per_bit_height + dy;
 
-                            // Check if this pixel is on a border
-                            let border_thickness: f64 = match style {
-                                ImageStyle::Horizon => 3.0,
-                                ImageStyle::Tiles => 1.0,
-                                ImageStyle::Stain => 0.0,
-                            };
-
-                            let is_tip_region = if pointing_down {
-                                dy >= pixels_per_bit_height - border_thickness as u32
+                            // Determine which sides the pixel belongs to
+                            let (left_edge, right_edge) = if pointing_down {
+                                (
+                                    tri_constants.center_x + half_width,
+                                    tri_constants.center_x - half_width,
+                                )
                             } else {
-                                dy < border_thickness as u32
+                                (
+                                    tri_constants.center_x - half_width,
+                                    tri_constants.center_x + half_width,
+                                )
                             };
 
-                            // Tip base: transition region adjacent to tip
-                            // Height is border_thickness rows, between tip and main body
-                            let is_tip_base_region = if pointing_down {
-                                dy >= pixels_per_bit_height - (2.0 * border_thickness) as u32
-                                    && dy < pixels_per_bit_height - border_thickness as u32
+                            let is_left_border = if pointing_down {
+                                left_edge - x <= border_thickness
                             } else {
-                                dy >= border_thickness as u32
-                                    && dy < (2.0 * border_thickness) as u32
+                                x - left_edge <= border_thickness
                             };
 
-                            let is_base_region = if pointing_down {
-                                dy < border_thickness as u32
+                            let is_right_border = if pointing_down {
+                                x - right_edge <= border_thickness
                             } else {
-                                dy >= pixels_per_bit_height - border_thickness as u32
+                                right_edge - x <= border_thickness
                             };
-
-                            // For tip_base region, determine which sides it belongs to
-                            // Left edge is at (center_x - half_width), right edge at (center_x + half_width)
-                            // Check if within border_thickness of each edge
-                            let left_edge = center_x - half_width;
-                            let right_edge = center_x + half_width;
-                            let is_left_border = x - left_edge <= border_thickness;
-                            let is_right_border = right_edge - x <= border_thickness;
-
-                            let is_tip_base_left_only =
-                                is_tip_base_region && is_left_border && !is_right_border;
-                            let is_tip_base_right_only =
-                                is_tip_base_region && is_right_border && !is_left_border;
-                            let is_tip_base_both =
-                                is_tip_base_region && is_left_border && is_right_border;
 
                             let is_border = is_base_region || is_left_border || is_right_border;
 
-                            // is_tip_region - A
-                            // is_tip_base_left_only - B
-                            // is_tip_base_both - C
-                            // is_tip_base_right_only - D
+                            let is_left_tip = if pointing_down {
+                                y < tri_constants.slope * (x - corners.left_tip_x as f64)
+                                    + corners.left_tip_y as f64
+                                    - 1.0
+                            } else {
+                                y >= tri_constants.slope * (x - corners.left_tip_x as f64)
+                                    + corners.left_tip_y as f64
+                            };
+
+                            let is_right_tip = if pointing_down {
+                                y <= -tri_constants.slope * (x - corners.right_tip_x as f64)
+                                    + corners.right_tip_y as f64
+                            } else {
+                                y >= -tri_constants.slope * (x - corners.right_tip_x as f64)
+                                    + corners.right_tip_y as f64
+                                    - 1.0
+                            };
+
+                            let is_top = is_right_border && is_left_border && !is_top_tip;
+                            let is_left = is_left_border && is_base_region && !is_left_tip;
+                            let is_right = is_right_border && is_base_region && !is_right_tip;
+                            let is_center = !is_border;
+                            let is_left_segment =
+                                is_left_border && !is_right_border && !is_base_region;
+                            let is_right_segment =
+                                is_right_border && !is_left_border && !is_base_region;
+                            let is_bottom_segment =
+                                is_base_region && !is_left_border && !is_right_border;
 
                             // Determine if we should draw this pixel
                             let should_draw = match style {
                                 ImageStyle::Horizon => {
-                                    !is_border
-                                        || is_tip_region
-                                        || is_tip_base_right_only
-                                        || is_tip_base_left_only
-                                        || is_tip_base_both
+                                    is_center
+                                        || (has_group
+                                            && ((neighbors.left && is_left_segment)
+                                                || (neighbors.right && is_right_segment)
+                                                || (neighbors.left && neighbors.right && is_top)
+                                                || (neighbors.bottom && is_bottom_segment)
+                                                || (neighbors.left && neighbors.bottom && is_left)
+                                                || (neighbors.right
+                                                    && neighbors.bottom
+                                                    && is_right)))
                                 }
                                 _ => border_thickness == 0.0 || !is_border,
                             };
@@ -1035,24 +1330,22 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
     // --- Attempt 1: naive row/col values ---
     eprintln!("DEBUG attempt 1: rows={} cols={}", row_naive, col_naive);
     match try_decode(row_naive, col_naive) {
-        Ok((kind, text)) => {
-            return Ok(DecodeDebug {
-                text: Some(text),
-                content_type: kind,
-                error: None,
-                image_width: gray_img.width(),
-                image_height: gray_img.height(),
-                total_triangles: triangles.len(),
-                row_count: row_naive,
-                column_count: col_naive,
-                bit_count: {
-                    let (_, bc) = read_bits_from_grid(&gray_img, row_naive, col_naive, &anchors);
-                    bc
-                },
-                annotated_png: annotated_png.clone(),
-                decode_method: "naive".to_string(),
-            });
-        }
+        Ok((kind, text)) => Ok(DecodeDebug {
+            text: Some(text),
+            content_type: kind,
+            error: None,
+            image_width: gray_img.width(),
+            image_height: gray_img.height(),
+            total_triangles: triangles.len(),
+            row_count: row_naive,
+            column_count: col_naive,
+            bit_count: {
+                let (_, bc) = read_bits_from_grid(&gray_img, row_naive, col_naive, &anchors);
+                bc
+            },
+            annotated_png: annotated_png.clone(),
+            decode_method: "naive".to_string(),
+        }),
         Err(e1) => {
             eprintln!("DEBUG attempt 1 failed: {}", e1);
 
@@ -1136,19 +1429,19 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
                     continue;
                 }
                 let (bits3, bit_count3) = read_bits_from_grid(&gray_img, r, c, &anchors);
-                if let Ok(decoded) = reed_solomon_decode(bits3) {
-                    if let Ok((kind, text)) = unpack_payload(&decoded) {
-                        eprintln!("DEBUG attempt 3 succeeded: rows={} cols={}", r, c);
-                        return Ok(DecodeDebug {
-                            text: Some(text),
-                            content_type: kind,
-                            row_count: r,
-                            column_count: c,
-                            bit_count: bit_count3,
-                            decode_method: "brute-force ±1".to_string(),
-                            ..debug
-                        });
-                    }
+                if let Ok(decoded) = reed_solomon_decode(bits3)
+                    && let Ok((kind, text)) = unpack_payload(&decoded)
+                {
+                    eprintln!("DEBUG attempt 3 succeeded: rows={} cols={}", r, c);
+                    return Ok(DecodeDebug {
+                        text: Some(text),
+                        content_type: kind,
+                        row_count: r,
+                        column_count: c,
+                        bit_count: bit_count3,
+                        decode_method: "brute-force ±1".to_string(),
+                        ..debug
+                    });
                 }
             }
 
@@ -1444,14 +1737,14 @@ fn count_rows_by_clustering(triangles: &[Triangle]) -> usize {
     // the current cluster mean exceeds the tolerance.
     let mut clusters: Vec<f32> = Vec::new(); // stores the running mean of each cluster
     for y in ys {
-        if let Some(mean) = clusters.last_mut() {
-            if (y - *mean).abs() <= tolerance {
-                // Blend y into the running mean (simple online mean).
-                // We use the cluster index to keep a proper average.
-                // Since we only need the count, a running mean is fine.
-                *mean = (*mean + y) / 2.0;
-                continue;
-            }
+        if let Some(mean) = clusters.last_mut()
+            && (y - *mean).abs() <= tolerance
+        {
+            // Blend y into the running mean (simple online mean).
+            // We use the cluster index to keep a proper average.
+            // Since we only need the count, a running mean is fine.
+            *mean = (*mean + y) / 2.0;
+            continue;
         }
         clusters.push(y);
     }
@@ -1490,12 +1783,12 @@ fn count_columns_by_pitch(triangles: &[Triangle], anchors: &Anchors) -> (usize, 
     // Proper row grouping with (mean_y, xs) tuples.
     let mut rows: Vec<(f32, Vec<f32>)> = Vec::new();
     for t in &sorted {
-        if let Some((mean_y, xs)) = rows.last_mut() {
-            if (t.center_y - *mean_y).abs() <= row_tol {
-                xs.push(t.center_x);
-                *mean_y = (*mean_y + t.center_y) / 2.0;
-                continue;
-            }
+        if let Some((mean_y, xs)) = rows.last_mut()
+            && (t.center_y - *mean_y).abs() <= row_tol
+        {
+            xs.push(t.center_x);
+            *mean_y = (*mean_y + t.center_y) / 2.0;
+            continue;
         }
         rows.push((t.center_y, vec![t.center_x]));
     }

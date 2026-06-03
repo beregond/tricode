@@ -63,6 +63,7 @@ class _MyHomePageState extends State<MyHomePage>
     with SingleTickerProviderStateMixin {
   late final TabController _tabController;
   final TextEditingController _textController = TextEditingController();
+  final FocusNode _textFocusNode = FocusNode();
   final TextEditingController _widthRatioController = TextEditingController(
     text: '21',
   );
@@ -106,6 +107,15 @@ class _MyHomePageState extends State<MyHomePage>
     _tabController = TabController(length: 2, vsync: this);
     _tabController.addListener(() {
       if (!_tabController.indexIsChanging) return;
+      // When switching to the Generate tab (index 1), focus the textarea
+      if (_tabController.index == 1) {
+        // Use a short delay to ensure the tab animation is complete
+        Future.delayed(const Duration(milliseconds: 100), () {
+          if (mounted) {
+            _textFocusNode.requestFocus();
+          }
+        });
+      }
       // When leaving the Read tab (index 0), reset its state
       if (_tabController.previousIndex == 0) {
         setState(() {
@@ -796,6 +806,7 @@ class _MyHomePageState extends State<MyHomePage>
                     padding: const EdgeInsets.all(16.0),
                     child: TextField(
                       controller: _textController,
+                      focusNode: _textFocusNode,
                       keyboardType: TextInputType.multiline,
                       textInputAction: TextInputAction.newline,
                       minLines: 3,
@@ -1146,6 +1157,7 @@ class _MyHomePageState extends State<MyHomePage>
     _generatedImageSub?.cancel();
     _decodeResultSub?.cancel();
     _textController.dispose();
+    _textFocusNode.dispose();
     _widthRatioController.dispose();
     _heightRatioController.dispose();
     _horizonSeedController.dispose();
