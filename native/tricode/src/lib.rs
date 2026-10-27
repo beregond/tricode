@@ -7,6 +7,7 @@ use image::{ExtendedColorType, GrayImage, ImageBuffer, ImageEncoder, Rgba};
 use imageproc::contrast::{ThresholdType, threshold};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 /// Pack a text payload into msgpack: `{"type": "<kind>", "value": "<payload>"}`.
 pub fn pack_payload(kind: &str, text: &str) -> Result<Vec<u8>, String> {
@@ -1294,7 +1295,7 @@ pub struct DecodeDebug {
     pub bit_count: usize,
     pub annotated_png: Vec<u8>,
     /// Which decode attempt succeeded (or was last tried on failure):
-    /// "naive", "cluster+pitch", "brute-force ±5", or "all failed".
+    /// "naive", "cluster+pitch", either with a " ±5" suffix when found in the neighbourhood, or "all failed".
     pub decode_method: String,
 }
 
@@ -1424,114 +1425,149 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
         )
         .map_err(|e| format!("Failed to encode annotated image: {}", e))?;
 
-    // Helper: attempt a full decode with the given row/col counts.
-    let try_decode = |rows: usize, cols: usize| -> Result<(String, String), String> {
-        let (bits, _) = read_bits_from_grid(&gray_img, rows, cols, &anchors);
-        try_unmix_decode(&bits, cols)
+    let ctx = GridContext {
+        triangles: &triangles,
+        anchors: &anchors,
+        row_naive,
+        col_naive,
     };
 
-    // --- Attempt 1: naive row/col values ---
-    eprintln!("DEBUG attempt 1: rows={} cols={}", row_naive, col_naive);
-    match try_decode(row_naive, col_naive) {
-        Ok((kind, text)) => Ok(DecodeDebug {
-            text: Some(text),
-            content_type: kind,
-            error: None,
-            image_width: gray_img.width(),
-            image_height: gray_img.height(),
-            total_triangles: triangles.len(),
-            row_count: row_naive,
-            column_count: col_naive,
-            bit_count: {
-                let (_, bc) = read_bits_from_grid(&gray_img, row_naive, col_naive, &anchors);
-                bc
-            },
-            annotated_png: annotated_png.clone(),
-            decode_method: "naive".to_string(),
-        }),
-        Err(e1) => {
-            eprintln!("DEBUG attempt 1 failed: {}", e1);
+    let base = DecodeDebug {
+        text: None,
+        content_type: String::new(),
+        error: None,
+        image_width: gray_img.width(),
+        image_height: gray_img.height(),
+        total_triangles: triangles.len(),
+        row_count: row_naive,
+        column_count: col_naive,
+        bit_count: 0,
+        annotated_png,
+        decode_method: String::new(),
+    };
 
-            // --- Attempt 2: cluster + pitch estimates, clamped to naive ± 1 ---
-            let row_raw = count_rows_by_clustering(&triangles);
-            let (col_raw, pitch_px) = count_columns_by_pitch(&triangles, &anchors);
-            let row_adj = row_raw.clamp(row_naive.saturating_sub(1), row_naive + 1);
-            let col_adj = col_raw.clamp(col_naive.saturating_sub(1), col_naive + 1);
-            eprintln!(
-                "DEBUG attempt 2: rows={} (raw {}) cols={} (raw {}, pitch={:.1}px)",
-                row_adj, row_raw, col_adj, col_raw, pitch_px
-            );
+    // Each strategy yields grid estimates. Every estimate is tried as-is, then
+    // its ±GRID_SEARCH_RADIUS neighbourhood (closest first). Already-tried grids are skipped.
+    let mut tried: HashSet<(usize, usize)> = HashSet::new();
+    let mut failures: Vec<String> = Vec::new();
 
-            let (bits2, bit_count2) = read_bits_from_grid(&gray_img, row_adj, col_adj, &anchors);
+    for strategy in GRID_STRATEGIES {
+        let mut attempted = 0usize;
+        let mut last_err = String::from("no new candidates");
 
-            let debug = DecodeDebug {
-                text: None,
-                content_type: String::new(),
-                error: None,
-                image_width: gray_img.width(),
-                image_height: gray_img.height(),
-                total_triangles: triangles.len(),
-                row_count: row_adj,
-                column_count: col_adj,
-                bit_count: bit_count2,
-                annotated_png,
-                decode_method: String::new(), // filled in by each subsequent return
-            };
-
-            // Attempt 2 result — succeed immediately, or fall through to attempt 3.
-            if let Ok((kind, text)) = try_unmix_decode(&bits2, col_adj) {
-                return Ok(DecodeDebug {
-                    text: Some(text),
-                    content_type: kind,
-                    decode_method: "cluster+pitch".to_string(),
-                    ..debug
-                });
-            }
-
-            // --- Attempt 3: try all permutations within ±GRID_SEARCH_RADIUS of (row_adj, col_adj),
-            // closest to the estimate first ---
-            const GRID_SEARCH_RADIUS: isize = 5;
-            let mut offsets: Vec<(isize, isize)> = (-GRID_SEARCH_RADIUS..=GRID_SEARCH_RADIUS)
-                .flat_map(|dr| (-GRID_SEARCH_RADIUS..=GRID_SEARCH_RADIUS).map(move |dc| (dr, dc)))
-                .filter(|&(dr, dc)| (dr, dc) != (0, 0))
-                .collect();
-            offsets.sort_by_key(|&(dr, dc)| dr.abs().max(dc.abs()));
-            eprintln!(
-                "DEBUG attempt 3: trying ±{} permutations of rows={} cols={}",
-                GRID_SEARCH_RADIUS, row_adj, col_adj
-            );
-            for (dr, dc) in offsets {
-                let r = (row_adj as isize + dr) as usize;
-                let c = (col_adj as isize + dc) as usize;
-                if r < 2 || c < 2 {
+        for estimate in (strategy.estimates)(&ctx) {
+            for (rows, cols) in with_neighbourhood(estimate) {
+                if rows < 2 || cols < 2 || !tried.insert((rows, cols)) {
                     continue;
                 }
-                let (bits3, bit_count3) = read_bits_from_grid(&gray_img, r, c, &anchors);
-                if let Ok((kind, text)) = try_unmix_decode(&bits3, c) {
-                    eprintln!("DEBUG attempt 3 succeeded: rows={} cols={}", r, c);
-                    return Ok(DecodeDebug {
-                        text: Some(text),
-                        content_type: kind,
-                        row_count: r,
-                        column_count: c,
-                        bit_count: bit_count3,
-                        decode_method: "brute-force ±5".to_string(),
-                        ..debug
-                    });
+                attempted += 1;
+                let (bits, bit_count) = read_bits_from_grid(&gray_img, rows, cols, &anchors);
+                match try_unmix_decode(&bits, cols) {
+                    Ok((kind, text)) => {
+                        let method = if (rows, cols) == estimate {
+                            strategy.name.to_string()
+                        } else {
+                            format!("{} ±{}", strategy.name, GRID_SEARCH_RADIUS)
+                        };
+                        eprintln!("DEBUG '{}' succeeded: rows={} cols={}", method, rows, cols);
+                        return Ok(DecodeDebug {
+                            text: Some(text),
+                            content_type: kind,
+                            row_count: rows,
+                            column_count: cols,
+                            bit_count,
+                            decode_method: method,
+                            ..base
+                        });
+                    }
+                    Err(e) => last_err = e,
                 }
             }
-
-            // All attempts failed — report with the attempt-2 debug values.
-            Ok(DecodeDebug {
-                error: Some(format!(
-                    "All attempts failed.\n1 (naive rows={} cols={}): {}\n2 (adjusted rows={} cols={}): RS/UTF-8 error\n3 (±1 permutations of rows={} cols={}): all failed",
-                    row_naive, col_naive, e1, row_adj, col_adj, row_adj, col_adj,
-                )),
-                decode_method: "all failed".to_string(),
-                ..debug
-            })
         }
+        failures.push(format!(
+            "{} ({} grids tried): {}",
+            strategy.name, attempted, last_err
+        ));
     }
+
+    // All strategies failed — report using the cluster+pitch estimate.
+    let (rows, cols) = cluster_pitch_estimate(&ctx);
+    let (_, bit_count) = read_bits_from_grid(&gray_img, rows, cols, &anchors);
+    Ok(DecodeDebug {
+        error: Some(format!("All attempts failed.\n{}", failures.join("\n"))),
+        row_count: rows,
+        column_count: cols,
+        bit_count,
+        decode_method: "all failed".to_string(),
+        ..base
+    })
+}
+
+/// Inputs shared by all grid-estimation strategies.
+struct GridContext<'a> {
+    triangles: &'a [Triangle],
+    anchors: &'a Anchors,
+    row_naive: usize,
+    col_naive: usize,
+}
+
+/// A named way of estimating the grid size. Returns `(rows, cols)` estimates, most likely first.
+struct GridStrategy {
+    name: &'static str,
+    estimates: fn(&GridContext) -> Vec<(usize, usize)>,
+}
+
+/// Strategies in the order they are tried.
+static GRID_STRATEGIES: &[GridStrategy] = &[
+    GridStrategy {
+        name: "naive",
+        estimates: naive_estimates,
+    },
+    GridStrategy {
+        name: "cluster+pitch",
+        estimates: cluster_pitch_estimates,
+    },
+];
+
+/// How far (in rows and columns) around each estimate the decoder searches.
+const GRID_SEARCH_RADIUS: isize = 5;
+
+fn naive_estimates(ctx: &GridContext) -> Vec<(usize, usize)> {
+    vec![(ctx.row_naive, ctx.col_naive)]
+}
+
+/// Cluster + pitch estimates, clamped to naive ± 1.
+fn cluster_pitch_estimate(ctx: &GridContext) -> (usize, usize) {
+    let row_raw = count_rows_by_clustering(ctx.triangles);
+    let (col_raw, pitch_px) = count_columns_by_pitch(ctx.triangles, ctx.anchors);
+    let rows = row_raw.clamp(ctx.row_naive.saturating_sub(1), ctx.row_naive + 1);
+    let cols = col_raw.clamp(ctx.col_naive.saturating_sub(1), ctx.col_naive + 1);
+    eprintln!(
+        "DEBUG cluster+pitch: rows={} (raw {}) cols={} (raw {}, pitch={:.1}px)",
+        rows, row_raw, cols, col_raw, pitch_px
+    );
+    (rows, cols)
+}
+
+fn cluster_pitch_estimates(ctx: &GridContext) -> Vec<(usize, usize)> {
+    vec![cluster_pitch_estimate(ctx)]
+}
+
+/// `estimate` itself followed by every grid within ±GRID_SEARCH_RADIUS of it, closest first.
+fn with_neighbourhood(estimate: (usize, usize)) -> Vec<(usize, usize)> {
+    let (rows, cols) = estimate;
+    let mut offsets: Vec<(isize, isize)> = (-GRID_SEARCH_RADIUS..=GRID_SEARCH_RADIUS)
+        .flat_map(|dr| (-GRID_SEARCH_RADIUS..=GRID_SEARCH_RADIUS).map(move |dc| (dr, dc)))
+        .collect();
+    offsets.sort_by_key(|&(dr, dc)| dr.abs().max(dc.abs()));
+    offsets
+        .into_iter()
+        .filter_map(|(dr, dc)| {
+            let r = usize::try_from(rows as isize + dr).ok()?;
+            let c = usize::try_from(cols as isize + dc).ok()?;
+            Some((r, c))
+        })
+        .collect()
 }
 
 /// Represents a detected triangle region
