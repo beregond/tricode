@@ -674,66 +674,67 @@ fn apply_mask(data: &[u8], mask: &[&[u8]], width_squares: u32) -> Vec<u8> {
     result
 }
 
+/// Predefined bitmasks, tiled over the grid. Shared by encoding and decoding.
+#[rustfmt::skip]
+static MASKS: &[&[&[u8]]] = &[
+    // Checkerboard (alternating per triangle)
+    &[
+        &[1, 0, 1, 0],
+        &[0, 1, 0, 1],
+        &[1, 0, 1, 0],
+        &[0, 1, 0, 1],
+    ],
+    // 2×2 blocks
+    &[
+        &[1, 1, 0, 0],
+        &[1, 1, 0, 0],
+        &[0, 0, 1, 1],
+        &[0, 0, 1, 1],
+    ],
+    // Right wave
+    &[
+        &[1, 0, 1, 1],
+        &[0, 1, 1, 0],
+        &[1, 1, 0, 1],
+        &[1, 0, 1, 1],
+    ],
+    // Left wave
+    &[
+        &[1, 1, 0, 1],
+        &[0, 1, 1, 0],
+        &[1, 0, 1, 1],
+        &[1, 1, 0, 1],
+    ],
+    // Vertical lines
+    &[
+        &[1, 0, 1, 0],
+        &[1, 0, 1, 0],
+        &[1, 0, 1, 0],
+        &[1, 0, 1, 0],
+    ],
+    // Horizontal lines
+    &[
+        &[1, 1, 1, 1],
+        &[0, 0, 0, 0],
+        &[1, 1, 1, 1],
+        &[0, 0, 0, 0],
+    ],
+    // Empty pattern, to check original data as well
+    &[
+        &[0, 0, 0, 0],
+        &[0, 0, 0, 0],
+        &[0, 0, 0, 0],
+        &[0, 0, 0, 0],
+    ],
+];
+
 /// XORs `encoded_data` with each predefined mask (tiled to cover the grid), then
 /// returns the result whose ratio of 1-bits to 0-bits is closest to 1
 /// (i.e. the most balanced bit distribution).
 fn mix_pixels(encoded_data: &[u8], width_squares: u32, _height_squares: u32) -> Vec<u8> {
-    #[rustfmt::skip]
-    let masks: &[&[&[u8]]] = &[
-        // Checkerboard (alternating per triangle)
-        &[
-            &[1, 0, 1, 0],
-            &[0, 1, 0, 1],
-            &[1, 0, 1, 0],
-            &[0, 1, 0, 1],
-        ],
-        // 2×2 blocks
-        &[
-            &[1, 1, 0, 0],
-            &[1, 1, 0, 0],
-            &[0, 0, 1, 1],
-            &[0, 0, 1, 1],
-        ],
-        // Right wave
-        &[
-            &[1, 0, 1, 1],
-            &[0, 1, 1, 0],
-            &[1, 1, 0, 1],
-            &[1, 0, 1, 1],
-        ],
-        // Left wave
-        &[
-            &[1, 1, 0, 1],
-            &[0, 1, 1, 0],
-            &[1, 0, 1, 1],
-            &[1, 1, 0, 1],
-        ],
-        // Vertical lines
-        &[
-            &[1, 0, 1, 0],
-            &[1, 0, 1, 0],
-            &[1, 0, 1, 0],
-            &[1, 0, 1, 0],
-        ],
-        // Horizontal lines
-        &[
-            &[1, 1, 1, 1],
-            &[0, 0, 0, 0],
-            &[1, 1, 1, 1],
-            &[0, 0, 0, 0],
-        ],
-        // Empty pattern, to check original data as well
-        &[
-            &[0, 0, 0, 0],
-            &[0, 0, 0, 0],
-            &[0, 0, 0, 0],
-            &[0, 0, 0, 0],
-        ],
-    ];
-
     let total_bits = encoded_data.len() * 8;
 
-    masks
+    MASKS
         .iter()
         .map(|mask| apply_mask(encoded_data, mask, width_squares))
         .min_by_key(|mixed| {
@@ -743,6 +744,15 @@ fn mix_pixels(encoded_data: &[u8], width_squares: u32, _height_squares: u32) -> 
             (ones - zeros).abs()
         })
         .unwrap_or_else(|| encoded_data.to_vec())
+}
+
+/// Reverse of [`mix_pixels`]: yields `data` unmixed with every predefined mask.
+/// The mask used when encoding isn't stored, so callers try each candidate
+/// until Reed-Solomon decoding succeeds.
+fn unmix_pixels(data: &[u8], width_squares: u32) -> impl Iterator<Item = Vec<u8>> + '_ {
+    MASKS
+        .iter()
+        .map(move |mask| apply_mask(data, mask, width_squares))
 }
 
 fn create_image_from_binary_data(
@@ -1284,7 +1294,7 @@ pub struct DecodeDebug {
     pub bit_count: usize,
     pub annotated_png: Vec<u8>,
     /// Which decode attempt succeeded (or was last tried on failure):
-    /// "naive", "cluster+pitch", "brute-force ±1", or "all failed".
+    /// "naive", "cluster+pitch", "brute-force ±5", or "all failed".
     pub decode_method: String,
 }
 
@@ -1417,8 +1427,7 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
     // Helper: attempt a full decode with the given row/col counts.
     let try_decode = |rows: usize, cols: usize| -> Result<(String, String), String> {
         let (bits, _) = read_bits_from_grid(&gray_img, rows, cols, &anchors);
-        let decoded_bytes = reed_solomon_decode(bits)?;
-        unpack_payload(&decoded_bytes)
+        try_unmix_decode(&bits, cols)
     };
 
     // --- Attempt 1: naive row/col values ---
@@ -1470,62 +1479,35 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
             };
 
             // Attempt 2 result — succeed immediately, or fall through to attempt 3.
-            let _e2_msg = match reed_solomon_decode(bits2) {
-                Ok(decoded_bytes) => match unpack_payload(&decoded_bytes) {
-                    Ok((kind, text)) => {
-                        return Ok(DecodeDebug {
-                            text: Some(text),
-                            content_type: kind,
-                            decode_method: "cluster+pitch".to_string(),
-                            ..debug
-                        });
-                    }
-                    Err(e) => format!("decoded data is not valid UTF-8: {}", e),
-                },
-                Err(e) => e,
-            };
+            if let Ok((kind, text)) = try_unmix_decode(&bits2, col_adj) {
+                return Ok(DecodeDebug {
+                    text: Some(text),
+                    content_type: kind,
+                    decode_method: "cluster+pitch".to_string(),
+                    ..debug
+                });
+            }
 
-            // --- Attempt 3: try all ±1 permutations of (row_adj, col_adj) ---
-            let offsets: &[(isize, isize)] = &[
-                (-2, -2),
-                (-2, -1),
-                (-2, 0),
-                (-2, 1),
-                (-2, 2),
-                (-1, -2),
-                (-1, -1),
-                (-1, 0),
-                (-1, 1),
-                (-1, 2),
-                (0, -2),
-                (0, -1),
-                (0, 1),
-                (0, 2),
-                (1, -2),
-                (1, -1),
-                (1, 0),
-                (1, 1),
-                (1, 2),
-                (2, -2),
-                (2, -1),
-                (2, 0),
-                (2, 1),
-                (2, 2),
-            ];
+            // --- Attempt 3: try all permutations within ±GRID_SEARCH_RADIUS of (row_adj, col_adj),
+            // closest to the estimate first ---
+            const GRID_SEARCH_RADIUS: isize = 5;
+            let mut offsets: Vec<(isize, isize)> = (-GRID_SEARCH_RADIUS..=GRID_SEARCH_RADIUS)
+                .flat_map(|dr| (-GRID_SEARCH_RADIUS..=GRID_SEARCH_RADIUS).map(move |dc| (dr, dc)))
+                .filter(|&(dr, dc)| (dr, dc) != (0, 0))
+                .collect();
+            offsets.sort_by_key(|&(dr, dc)| dr.abs().max(dc.abs()));
             eprintln!(
-                "DEBUG attempt 3: trying ±2 permutations of rows={} cols={}",
-                row_adj, col_adj
+                "DEBUG attempt 3: trying ±{} permutations of rows={} cols={}",
+                GRID_SEARCH_RADIUS, row_adj, col_adj
             );
-            for &(dr, dc) in offsets {
+            for (dr, dc) in offsets {
                 let r = (row_adj as isize + dr) as usize;
                 let c = (col_adj as isize + dc) as usize;
                 if r < 2 || c < 2 {
                     continue;
                 }
                 let (bits3, bit_count3) = read_bits_from_grid(&gray_img, r, c, &anchors);
-                if let Ok(decoded) = reed_solomon_decode(bits3)
-                    && let Ok((kind, text)) = unpack_payload(&decoded)
-                {
+                if let Ok((kind, text)) = try_unmix_decode(&bits3, c) {
                     eprintln!("DEBUG attempt 3 succeeded: rows={} cols={}", r, c);
                     return Ok(DecodeDebug {
                         text: Some(text),
@@ -1533,7 +1515,7 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
                         row_count: r,
                         column_count: c,
                         bit_count: bit_count3,
-                        decode_method: "brute-force ±1".to_string(),
+                        decode_method: "brute-force ±5".to_string(),
                         ..debug
                     });
                 }
@@ -2104,6 +2086,19 @@ fn centroid_to_bbox_center(triangle: &Triangle) -> (f32, f32) {
         triangle.center_y + correction
     };
     (triangle.center_x, bbox_cy)
+}
+
+/// Tries every unmixed variant of `bits` until Reed-Solomon decoding and
+/// payload unpacking succeed.
+fn try_unmix_decode(bits: &[u8], width_squares: usize) -> Result<(String, String), String> {
+    let mut last_err = "no masks to try".to_string();
+    for candidate in unmix_pixels(bits, width_squares as u32) {
+        match reed_solomon_decode(candidate).and_then(|d| unpack_payload(&d)) {
+            Ok(result) => return Ok(result),
+            Err(e) => last_err = e,
+        }
+    }
+    Err(last_err)
 }
 
 /// Read bits from the image by sampling the pixel color at the center of each
