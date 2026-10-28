@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pinned so new lints in a fresh stable release don't break CI unannounced; bump deliberately.
+  RUST_TOOLCHAIN: "1.97.1"
+  FLUTTER_VERSION: "3.47.2"
+  # Must match `rinf` in native/hub/Cargo.toml and pubspec.yaml.
+  RINF_VERSION: "8.10.0"
+
+jobs:
+  rust-lint:
+    name: Rust lint (rustfmt, clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  rust-test:
+    name: Rust tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - run: devbin/tricode-test
+
+  flutter:
+    name: Flutter (format, analyze, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - run: flutter pub get
+      # lib/src/bindings/ is gitignored, and the Dart code doesn't compile without it.
+      - run: cargo install rinf_cli --version "$RINF_VERSION" --locked
+      - run: rinf gen
+      # Tracked files only: the generated bindings aren't dart-formatted.
+      - run: dart format --output=none --set-exit-if-changed $(git ls-files '*.dart')
+      - run: flutter analyze
+      - run: flutter test
+
+  shellcheck:
+    name: ShellCheck (devbin)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck devbin/*

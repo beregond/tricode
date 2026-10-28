@@ -24,7 +24,7 @@ Whenever `native/hub/src/signals/mod.rs` is modified (add/rename/remove a struct
 rinf gen
 ```
 
-This overwrites everything under `lib/src/bindings/`. The tool must be installed first: `cargo install rinf_cli`. Rinf version in `pubspec.yaml` and `native/hub/Cargo.toml` must match (currently `8.8.1`).
+This overwrites everything under `lib/src/bindings/`. The tool must be installed first: `cargo install rinf_cli`. Rinf version in `pubspec.yaml` and `native/hub/Cargo.toml` must match (currently `8.10.0`; also pinned as `RINF_VERSION` in `.github/workflows/ci.yml`).
 
 ## How signals work
 
@@ -77,6 +77,6 @@ These are `deny`-level in `native/hub/Cargo.toml` (not in `native/tricode`):
 - **Decode fixtures** live in `native/tricode/testdata/decode/`, named `{style}_{w}x{h}_len{len}_{rows}x{cols}.png`. After an intentional rendering-format change, rewrite them with `tricode-regen-fixtures`. Tests are slow in debug builds (triangle detection), so prefer `tricode-test`, which runs them with `--release`.
 - **`devbin/`** holds dev scripts; `.envrc` adds it to `PATH` via direnv (run `direnv allow` once). Without direnv, call them as `devbin/<script>`.
 - **Rust edition `2024`** requires Rust ≥ 1.85; workspace resolver `"3"` requires Rust ≥ 1.74. No `.rust-toolchain` file exists.
-- **No CI pipeline**, no Makefile/taskfile, no pre-commit hooks — all commands are run directly.
+- **CI** is `.github/workflows/ci.yml` (push to `main` and every pull request): rustfmt, clippy with `-D warnings`, `tricode-test`, `rinf gen` + `dart format` check on tracked Dart files + `flutter analyze` + `flutter test`, and shellcheck on `devbin/`. Rust and Flutter versions are pinned there; bump them deliberately. No Makefile/taskfile or pre-commit hooks.
 - **Web support is partially wired**: `tokio_with_wasm` and `wasm-bindgen` are already deps in hub. To enable web builds, uncomment `// use tokio_with_wasm::alias as tokio;` in `actors/mod.rs`, `actors/generation.rs`, and `hub/src/lib.rs`.
 - **Dart SDK constraint is `^3.10.7`** — Flutter 3.x with Dart 3.10+ required.
