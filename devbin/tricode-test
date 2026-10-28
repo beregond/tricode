@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Runs the tricode crate's tests in release mode (debug builds make triangle detection very slow).
+# Extra arguments are passed to `cargo test`, e.g. `tricode-test decodes_fixtures -- --nocapture`.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+exec cargo test -p tricode --release "$@"

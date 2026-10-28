@@ -51,6 +51,8 @@ Each actor spawns its own Dart-signal listener in `new()` using `JoinSet::spawn`
 | Dart format | `dart format .` |
 | Rust build (check) | `cargo build` (from repo root) |
 | Rust tests | `cargo test` or `cargo test -p tricode` |
+| tricode tests (release, fast) | `tricode-test [cargo test args]` |
+| Regenerate decode fixtures | `tricode-regen-fixtures` |
 | Rust lint | `cargo clippy` |
 | Rust format | `cargo fmt` |
 | Flutter tests | `flutter test` |
@@ -72,6 +74,8 @@ These are `deny`-level in `native/hub/Cargo.toml` (not in `native/tricode`):
 - **`image` crate in tricode** uses `default-features = false` with only `png` + `rayon` features — only PNG I/O works; adding other formats requires editing `native/tricode/Cargo.toml`.
 - **`base64_encode()` in `native/tricode/src/lib.rs`** is dead code (unused after the decode flow was simplified).
 - **`native/tricode` has no `tests/` directory** — `cargo test -p tricode` only runs `#[cfg(test)]` blocks inline in `lib.rs`.
+- **Decode fixtures** live in `native/tricode/testdata/decode/`, named `{style}_{w}x{h}_len{len}_{rows}x{cols}.png`. After an intentional rendering-format change, rewrite them with `tricode-regen-fixtures`. Tests are slow in debug builds (triangle detection), so prefer `tricode-test`, which runs them with `--release`.
+- **`devbin/`** holds dev scripts; `.envrc` adds it to `PATH` via direnv (run `direnv allow` once). Without direnv, call them as `devbin/<script>`.
 - **Rust edition `2024`** requires Rust ≥ 1.85; workspace resolver `"3"` requires Rust ≥ 1.74. No `.rust-toolchain` file exists.
 - **No CI pipeline**, no Makefile/taskfile, no pre-commit hooks — all commands are run directly.
 - **Web support is partially wired**: `tokio_with_wasm` and `wasm-bindgen` are already deps in hub. To enable web builds, uncomment `// use tokio_with_wasm::alias as tokio;` in `actors/mod.rs`, `actors/generation.rs`, and `hub/src/lib.rs`.

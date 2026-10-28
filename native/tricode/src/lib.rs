@@ -2,6 +2,14 @@
 /// is considered a cluster/merge false positive and is discarded before grid reading.
 const FALSE_POSITIVE_AREA_FACTOR: f32 = 1.2;
 
+/// Bit box width in pixels.
+const PIXELS_PER_BIT_WIDTH: u32 = 51;
+
+/// Bit box height in pixels: the height of an equilateral triangle `PIXELS_PER_BIT_WIDTH` wide.
+fn pixels_per_bit_height() -> u32 {
+    ((PIXELS_PER_BIT_WIDTH as f64) * (3.0_f64.sqrt() / 2.0)).ceil() as u32
+}
+
 use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, GrayImage, ImageBuffer, ImageEncoder, Rgba};
 use imageproc::contrast::{ThresholdType, threshold};
@@ -765,9 +773,7 @@ fn create_image_from_binary_data(
     bg: Rgba<u8>,
     horizon_seed: u64,
 ) -> GenerateDebug {
-    const PIXELS_PER_BIT_WIDTH: u32 = 51; // Bit box width in pixels
-    let pixels_per_bit_height =
-        ((PIXELS_PER_BIT_WIDTH as f64) * (3.0_f64.sqrt() / 2.0)).ceil() as u32;
+    let pixels_per_bit_height = pixels_per_bit_height();
 
     // Calculate total bits needed, we add 8 bits for border marks
     let total_bits = (encoded_data.len() + 1) * 8;
@@ -1295,7 +1301,7 @@ pub struct DecodeDebug {
     pub bit_count: usize,
     pub annotated_png: Vec<u8>,
     /// Which decode attempt succeeded (or was last tried on failure):
-    /// "naive", "cluster+pitch", either with a " ±5" suffix when found in the neighbourhood, or "all failed".
+    /// "lattice-fit", "naive", "cluster+pitch", any of them with a " ±5" suffix when found in the neighbourhood, or "all failed".
     pub decode_method: String,
 }
 
@@ -1318,35 +1324,7 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
     // Find the four anchor triangles at the grid corners
     let anchors = find_anchors(&triangles).ok_or("Could not find anchor triangles")?;
 
-    // Remove false positives: any triangle significantly larger than the biggest anchor
-    // is a cluster/merge artefact and should be discarded.
-    let max_anchor_area = anchors
-        .all()
-        .iter()
-        .map(|t| {
-            let w = (t.max_x - t.min_x) as f32;
-            let h = (t.max_y - t.min_y) as f32;
-            w * h
-        })
-        .fold(0.0f32, f32::max);
-    let area_threshold = max_anchor_area * FALSE_POSITIVE_AREA_FACTOR;
-    let before = triangles.len();
-    let triangles: Vec<Triangle> = triangles
-        .into_iter()
-        .filter(|t| {
-            let w = (t.max_x - t.min_x) as f32;
-            let h = (t.max_y - t.min_y) as f32;
-            w * h <= area_threshold
-        })
-        .collect();
-    eprintln!(
-        "DEBUG false-positive filter: max_anchor_area={:.0} threshold={:.0} (factor={}) removed={} remaining={}",
-        max_anchor_area,
-        area_threshold,
-        FALSE_POSITIVE_AREA_FACTOR,
-        before - triangles.len(),
-        triangles.len()
-    );
+    let triangles = discard_merged_triangles(triangles, &anchors);
 
     eprintln!("DEBUG anchors:");
     eprintln!(
@@ -1430,6 +1408,7 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
         anchors: &anchors,
         row_naive,
         col_naive,
+        fit: fit_lattice(&triangles, &anchors),
     };
 
     let base = DecodeDebug {
@@ -1456,12 +1435,13 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
         let mut last_err = String::from("no new candidates");
 
         for estimate in (strategy.estimates)(&ctx) {
-            for (rows, cols) in with_neighbourhood(estimate) {
-                if rows < 2 || cols < 2 || !tried.insert((rows, cols)) {
+            for (rows, cols) in with_neighbourhood(&ctx, estimate) {
+                if !tried.insert((rows, cols)) {
                     continue;
                 }
                 attempted += 1;
-                let (bits, bit_count) = read_bits_from_grid(&gray_img, rows, cols, &anchors);
+                let lattice = ctx.lattice_for(rows, cols);
+                let (bits, bit_count) = read_bits_from_grid(&gray_img, rows, cols, &lattice);
                 match try_unmix_decode(&bits, cols) {
                     Ok((kind, text)) => {
                         let method = if (rows, cols) == estimate {
@@ -1490,9 +1470,13 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
         ));
     }
 
-    // All strategies failed — report using the cluster+pitch estimate.
-    let (rows, cols) = cluster_pitch_estimate(&ctx);
-    let (_, bit_count) = read_bits_from_grid(&gray_img, rows, cols, &anchors);
+    // All strategies failed — report using the fitted grid, or the cluster+pitch estimate without one.
+    let (rows, cols) = match &ctx.fit {
+        Some(fit) => (fit.rows, fit.cols),
+        None => cluster_pitch_estimate(&ctx),
+    };
+    let lattice = ctx.lattice_for(rows, cols);
+    let (_, bit_count) = read_bits_from_grid(&gray_img, rows, cols, &lattice);
     Ok(DecodeDebug {
         error: Some(format!("All attempts failed.\n{}", failures.join("\n"))),
         row_count: rows,
@@ -1503,12 +1487,58 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
     })
 }
 
+/// Remove false positives: any triangle significantly larger than the biggest anchor
+/// is a cluster/merge artefact and should be discarded.
+fn discard_merged_triangles(triangles: Vec<Triangle>, anchors: &Anchors) -> Vec<Triangle> {
+    let max_anchor_area = anchors
+        .all()
+        .iter()
+        .map(|t| {
+            let w = (t.max_x - t.min_x) as f32;
+            let h = (t.max_y - t.min_y) as f32;
+            w * h
+        })
+        .fold(0.0f32, f32::max);
+    let area_threshold = max_anchor_area * FALSE_POSITIVE_AREA_FACTOR;
+    let before = triangles.len();
+    let triangles: Vec<Triangle> = triangles
+        .into_iter()
+        .filter(|t| {
+            let w = (t.max_x - t.min_x) as f32;
+            let h = (t.max_y - t.min_y) as f32;
+            w * h <= area_threshold
+        })
+        .collect();
+    eprintln!(
+        "DEBUG false-positive filter: max_anchor_area={:.0} threshold={:.0} (factor={}) removed={} remaining={}",
+        max_anchor_area,
+        area_threshold,
+        FALSE_POSITIVE_AREA_FACTOR,
+        before - triangles.len(),
+        triangles.len()
+    );
+
+    triangles
+}
+
 /// Inputs shared by all grid-estimation strategies.
 struct GridContext<'a> {
     triangles: &'a [Triangle],
     anchors: &'a Anchors,
     row_naive: usize,
     col_naive: usize,
+    fit: Option<LatticeFit>,
+}
+
+impl GridContext<'_> {
+    /// The lattice to read a `rows × cols` grid from: the fitted one when it describes that grid,
+    /// otherwise the one spanned by the anchors.
+    fn lattice_for(&self, rows: usize, cols: usize) -> Lattice {
+        match &self.fit {
+            Some(fit) if (fit.rows, fit.cols) == (rows, cols) => fit.lattice,
+            _ => Lattice::from_anchors(self.anchors, rows, cols),
+        }
+    }
 }
 
 /// A named way of estimating the grid size. Returns `(rows, cols)` estimates, most likely first.
@@ -1519,6 +1549,10 @@ struct GridStrategy {
 
 /// Strategies in the order they are tried.
 static GRID_STRATEGIES: &[GridStrategy] = &[
+    GridStrategy {
+        name: "lattice-fit",
+        estimates: lattice_fit_estimates,
+    },
     GridStrategy {
         name: "naive",
         estimates: naive_estimates,
@@ -1531,6 +1565,10 @@ static GRID_STRATEGIES: &[GridStrategy] = &[
 
 /// How far (in rows and columns) around each estimate the decoder searches.
 const GRID_SEARCH_RADIUS: isize = 5;
+
+fn lattice_fit_estimates(ctx: &GridContext) -> Vec<(usize, usize)> {
+    ctx.fit.iter().map(|fit| (fit.rows, fit.cols)).collect()
+}
 
 fn naive_estimates(ctx: &GridContext) -> Vec<(usize, usize)> {
     vec![(ctx.row_naive, ctx.col_naive)]
@@ -1553,21 +1591,374 @@ fn cluster_pitch_estimates(ctx: &GridContext) -> Vec<(usize, usize)> {
     vec![cluster_pitch_estimate(ctx)]
 }
 
-/// `estimate` itself followed by every grid within ±GRID_SEARCH_RADIUS of it, closest first.
-fn with_neighbourhood(estimate: (usize, usize)) -> Vec<(usize, usize)> {
+/// `estimate` and every grid within ±GRID_SEARCH_RADIUS of it, ordered by how well the detected
+/// triangles fit each grid (see [`Lattice::misfit`]), closest to `estimate` first on ties.
+/// Grids smaller than 2×2 are left out.
+fn with_neighbourhood(ctx: &GridContext, estimate: (usize, usize)) -> Vec<(usize, usize)> {
     let (rows, cols) = estimate;
-    let mut offsets: Vec<(isize, isize)> = (-GRID_SEARCH_RADIUS..=GRID_SEARCH_RADIUS)
+    let mut candidates: Vec<(f32, isize, (usize, usize))> = (-GRID_SEARCH_RADIUS
+        ..=GRID_SEARCH_RADIUS)
         .flat_map(|dr| (-GRID_SEARCH_RADIUS..=GRID_SEARCH_RADIUS).map(move |dc| (dr, dc)))
-        .collect();
-    offsets.sort_by_key(|&(dr, dc)| dr.abs().max(dc.abs()));
-    offsets
-        .into_iter()
         .filter_map(|(dr, dc)| {
             let r = usize::try_from(rows as isize + dr).ok()?;
             let c = usize::try_from(cols as isize + dc).ok()?;
-            Some((r, c))
+            if r < 2 || c < 2 {
+                return None;
+            }
+            let misfit = ctx.lattice_for(r, c).misfit(ctx.triangles, r, c);
+            Some((misfit, dr.abs().max(dc.abs()), (r, c)))
         })
-        .collect()
+        .collect();
+    candidates.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    candidates.into_iter().map(|(_, _, grid)| grid).collect()
+}
+
+/// Rows advance by a full bit box and columns by half of one (neighbouring triangles interlock),
+/// so this is the row pitch divided by the column pitch of a rendered grid.
+fn pitch_aspect() -> f32 {
+    pixels_per_bit_height() as f32 / (PIXELS_PER_BIT_WIDTH / 2) as f32
+}
+
+/// Distance, in row pitches, from a triangle's centroid to the centre of its cell. A pointing-down
+/// triangle's centroid lies a third of its height below its base, i.e. this far above the centre;
+/// a pointing-up one lies this far below it.
+const CENTROID_OFFSET: f32 = 1.0 / 6.0;
+
+/// Search range for the column pitch, as multiples of half the median triangle width. Borders and
+/// erosion make triangles narrower than their cell, so the true pitch is at or above 1×; the range
+/// stays clear of 0.5× and 2×, where the lattice would also line up.
+const COL_PITCH_SEARCH: (f32, f32) = (0.8, 1.7);
+
+/// How far the row pitch may stray from `col_pitch · pitch_aspect()`.
+const ROW_PITCH_TOLERANCE: f32 = 0.15;
+
+/// Least-squares refinement passes after the initial period estimate.
+const FIT_ITERATIONS: usize = 3;
+
+/// Triangles further than this (in pitches) from their nearest lattice point don't take part in
+/// the least-squares fit.
+const FIT_INLIER_DISTANCE: f32 = 0.3;
+
+/// A fitted lattice is rejected when fewer triangles than this have the orientation their cell
+/// requires.
+const MIN_PARITY_AGREEMENT: f32 = 0.9;
+
+/// Index into per-orientation arrays: 0 for pointing down, 1 for pointing up.
+fn orientation_group(pointing_down: bool) -> usize {
+    usize::from(!pointing_down)
+}
+
+/// Triangle centroid positions of a grid, in image pixels.
+///
+/// Cell `(row, col)` has its centroid at `(x0[g] + col·col_pitch, y0[g] + row·row_pitch)`, where
+/// `g` is the cell's [`orientation_group`]. Cell `(0, 0)` is the top-left anchor, which always
+/// points down. Centroids are used rather than bounding boxes because a border shrinks a triangle
+/// evenly from every side, which leaves its centroid where it was.
+#[derive(Debug, Clone, Copy)]
+struct Lattice {
+    x0: [f32; 2],
+    y0: [f32; 2],
+    col_pitch: f32,
+    row_pitch: f32,
+}
+
+impl Lattice {
+    /// The lattice spanned by the anchors for a `rows × cols` grid (both at least 2).
+    fn from_anchors(anchors: &Anchors, rows: usize, cols: usize) -> Self {
+        let top_left = &anchors.top_left;
+        let col_pitch = (anchors.top_right.center_x - top_left.center_x) / (cols - 1) as f32;
+        // A pointing-up bottom-left anchor sits an extra 2·CENTROID_OFFSET pitches lower.
+        let span = anchors.bottom_left.center_y - top_left.center_y;
+        let last_row = (rows - 1) as f32;
+        let row_pitch = if Self::points_down(rows - 1, 0) {
+            span / last_row
+        } else {
+            span / (last_row + 2.0 * CENTROID_OFFSET)
+        };
+        Self {
+            x0: [top_left.center_x; 2],
+            y0: [
+                top_left.center_y,
+                top_left.center_y + 2.0 * CENTROID_OFFSET * row_pitch,
+            ],
+            col_pitch,
+            row_pitch,
+        }
+    }
+
+    /// Orientation of cell `(row, col)`, matching the renderer.
+    fn points_down(row: usize, col: usize) -> bool {
+        (row + col).is_multiple_of(2)
+    }
+
+    fn centroid(&self, row: usize, col: usize) -> (f32, f32) {
+        let g = orientation_group(Self::points_down(row, col));
+        (
+            self.x0[g] + col as f32 * self.col_pitch,
+            self.y0[g] + row as f32 * self.row_pitch,
+        )
+    }
+
+    /// How badly the triangles fit a `rows × cols` grid on this lattice: the mean squared distance
+    /// (in pitches) from each centroid to its nearest cell, plus the fraction of triangles outside
+    /// the grid or with the wrong orientation for their cell. 0 is a perfect fit.
+    fn misfit(&self, triangles: &[Triangle], rows: usize, cols: usize) -> f32 {
+        if triangles.is_empty() {
+            return f32::MAX;
+        }
+        let mut total = 0.0f32;
+        for t in triangles {
+            let g = orientation_group(!t.pointing_up);
+            let col_f = (t.center_x - self.x0[g]) / self.col_pitch;
+            let row_f = (t.center_y - self.y0[g]) / self.row_pitch;
+            let (col, row) = (col_f.round(), row_f.round());
+            total += (col_f - col).powi(2) + (row_f - row).powi(2);
+            let inside = row >= 0.0 && col >= 0.0 && (row as usize) < rows && (col as usize) < cols;
+            if !inside || Self::points_down(row as usize, col as usize) == t.pointing_up {
+                total += 1.0;
+            }
+        }
+        total / triangles.len() as f32
+    }
+}
+
+/// A lattice fitted to every detected triangle, and the grid size it implies.
+#[derive(Debug, Clone, Copy)]
+struct LatticeFit {
+    lattice: Lattice,
+    rows: usize,
+    cols: usize,
+}
+
+/// Fits a [`Lattice`] to all triangles, so that every one of them (not just the anchors) pins down
+/// the pitch, then reads the grid size off the anchors' lattice indices.
+///
+/// Returns `None` when the fit fails its sanity checks: anchors that don't form a rectangle, too
+/// many triangles with the wrong orientation for their cell, or a row/column pitch ratio that
+/// doesn't match the renderer.
+fn fit_lattice(triangles: &[Triangle], anchors: &Anchors) -> Option<LatticeFit> {
+    if triangles.len() < 4 {
+        return None;
+    }
+
+    let mut widths: Vec<f32> = triangles
+        .iter()
+        .map(|t| (t.max_x - t.min_x + 1) as f32)
+        .collect();
+    widths.sort_by(f32::total_cmp);
+    let half_width = widths[widths.len() / 2] / 2.0;
+
+    let samples = |pos: fn(&Triangle) -> f32| -> Vec<AxisSample> {
+        triangles
+            .iter()
+            .map(|t| AxisSample {
+                pos: pos(t),
+                group: orientation_group(!t.pointing_up),
+            })
+            .collect()
+    };
+
+    // Columns first: there are usually more of them, and the row pitch then only needs a narrow
+    // search around `col_pitch · pitch_aspect()`.
+    let x = fit_axis(
+        &samples(|t| t.center_x),
+        [0.0, 0.0],
+        half_width * COL_PITCH_SEARCH.0,
+        half_width * COL_PITCH_SEARCH.1,
+    )?;
+    let expected_row_pitch = x.pitch * pitch_aspect();
+    let y = fit_axis(
+        &samples(|t| t.center_y),
+        [CENTROID_OFFSET, -CENTROID_OFFSET],
+        expected_row_pitch * (1.0 - ROW_PITCH_TOLERANCE),
+        expected_row_pitch * (1.0 + ROW_PITCH_TOLERANCE),
+    )?;
+
+    let index = |t: &Triangle| {
+        let g = orientation_group(!t.pointing_up);
+        (
+            y.index(t.center_y, g).round() as i64,
+            x.index(t.center_x, g).round() as i64,
+        )
+    };
+    let (top, left) = index(&anchors.top_left);
+    let (top_right_row, right) = index(&anchors.top_right);
+    let (bottom, bottom_left_col) = index(&anchors.bottom_left);
+    let bottom_right = index(&anchors.bottom_right);
+
+    let parity_matches = triangles
+        .iter()
+        .filter(|t| {
+            let (r, c) = index(t);
+            (((r - top) + (c - left)).rem_euclid(2) == 0) != t.pointing_up
+        })
+        .count();
+    let parity = parity_matches as f32 / triangles.len() as f32;
+    let aspect = y.pitch / x.pitch / pitch_aspect();
+
+    eprintln!(
+        "DEBUG lattice-fit: col_pitch={:.3} row_pitch={:.3} aspect={:.3} parity={:.3} anchors tl=({},{}) tr=({},{}) bl=({},{}) br=({},{})",
+        x.pitch,
+        y.pitch,
+        aspect,
+        parity,
+        top,
+        left,
+        top_right_row,
+        right,
+        bottom,
+        bottom_left_col,
+        bottom_right.0,
+        bottom_right.1
+    );
+
+    if top_right_row != top || bottom_left_col != left || bottom_right != (bottom, right) {
+        eprintln!("DEBUG lattice-fit rejected: anchors don't form a rectangle");
+        return None;
+    }
+    if parity < MIN_PARITY_AGREEMENT {
+        eprintln!("DEBUG lattice-fit rejected: orientation parity too low");
+        return None;
+    }
+    if (aspect - 1.0).abs() > ROW_PITCH_TOLERANCE {
+        eprintln!("DEBUG lattice-fit rejected: pitch aspect off");
+        return None;
+    }
+
+    let rows = usize::try_from(bottom - top + 1).ok()?;
+    let cols = usize::try_from(right - left + 1).ok()?;
+    if rows < 2 || cols < 2 {
+        return None;
+    }
+
+    // Re-base so that cell (0, 0) is the top-left anchor.
+    let lattice = Lattice {
+        x0: x.intercepts.map(|a| a + left as f32 * x.pitch),
+        y0: y.intercepts.map(|a| a + top as f32 * y.pitch),
+        col_pitch: x.pitch,
+        row_pitch: y.pitch,
+    };
+    Some(LatticeFit {
+        lattice,
+        rows,
+        cols,
+    })
+}
+
+/// A triangle's centroid position along one axis, and its [`orientation_group`].
+#[derive(Debug, Clone, Copy)]
+struct AxisSample {
+    pos: f32,
+    group: usize,
+}
+
+/// One axis of a fitted lattice: a sample in group `g` at lattice index `k` sits at
+/// `intercepts[g] + k·pitch`. Indices are relative to an arbitrary lattice point.
+#[derive(Debug, Clone, Copy)]
+struct AxisFit {
+    intercepts: [f32; 2],
+    pitch: f32,
+}
+
+impl AxisFit {
+    /// Fractional lattice index of a position.
+    fn index(&self, pos: f32, group: usize) -> f32 {
+        (pos - self.intercepts[group]) / self.pitch
+    }
+}
+
+/// Fits one lattice axis to `samples`. `offsets[g]` is how far (in pitches) group `g` sits from
+/// the cell centre, which lets both orientations share one set of lattice points.
+///
+/// The pitch is first found by [`dominant_period`], then refined by least squares with one shared
+/// pitch and a separate intercept per group, so a systematic centroid shift in one orientation
+/// doesn't bias the pitch.
+fn fit_axis(samples: &[AxisSample], offsets: [f32; 2], lo: f32, hi: f32) -> Option<AxisFit> {
+    let shifted: Vec<(f32, f32)> = samples.iter().map(|s| (s.pos, offsets[s.group])).collect();
+    let (pitch, origin) = dominant_period(&shifted, lo, hi)?;
+    let mut fit = AxisFit {
+        intercepts: offsets.map(|o| origin - o * pitch),
+        pitch,
+    };
+
+    for _ in 0..FIT_ITERATIONS {
+        // Per group: count, Σk, Σv, Σk², Σkv over inliers.
+        let mut sums = [[0.0f64; 5]; 2];
+        for s in samples {
+            let k_f = fit.index(s.pos, s.group);
+            let k = k_f.round();
+            if (k_f - k).abs() > FIT_INLIER_DISTANCE {
+                continue;
+            }
+            let (k, v) = (k as f64, s.pos as f64);
+            let sum = &mut sums[s.group];
+            sum[0] += 1.0;
+            sum[1] += k;
+            sum[2] += v;
+            sum[3] += k * k;
+            sum[4] += k * v;
+        }
+
+        let (mut sxx, mut sxy) = (0.0f64, 0.0f64);
+        for [n, sk, sv, skk, skv] in sums {
+            if n > 0.0 {
+                sxx += skk - sk * sk / n;
+                sxy += skv - sk * sv / n;
+            }
+        }
+        if sxx <= 0.0 {
+            return None;
+        }
+        let pitch = sxy / sxx;
+        let intercept =
+            |[n, sk, sv, ..]: [f64; 5]| (n > 0.0).then(|| ((sv - pitch * sk) / n) as f32);
+        let pitch = pitch as f32;
+        fit.intercepts = match (intercept(sums[0]), intercept(sums[1])) {
+            (Some(a), Some(b)) => [a, b],
+            (Some(a), None) => [a, a + (offsets[0] - offsets[1]) * pitch],
+            (None, Some(b)) => [b + (offsets[1] - offsets[0]) * pitch, b],
+            (None, None) => return None,
+        };
+        fit.pitch = pitch;
+    }
+
+    Some(fit)
+}
+
+/// Finds the period in `lo..=hi` at which the `(position, offset)` samples line up best: the one
+/// that maximises the length of their summed phase vector, with phase `position / period + offset`.
+/// Returns `(period, origin)`, where `origin` is the position of one lattice point.
+///
+/// Unlike rounding a single span by a single size, every sample contributes, so the error of
+/// individual centroids averages out.
+fn dominant_period(samples: &[(f32, f32)], lo: f32, hi: f32) -> Option<(f32, f32)> {
+    if samples.is_empty() || !(lo > 0.0 && hi > lo) {
+        return None;
+    }
+    let min = samples.iter().map(|s| s.0).fold(f32::MAX, f32::min);
+    let max = samples.iter().map(|s| s.0).fold(f32::MIN, f32::max);
+    // Between two tried periods the phase at the far end of the span must drift by well under a
+    // cycle, or the peak could be stepped over.
+    let span = (max - min).max(hi) as f64;
+    let step = (lo as f64).powi(2) / (16.0 * span);
+    let steps = (((hi - lo) as f64 / step).ceil() as usize).min(100_000);
+
+    let mut best: Option<(f64, f32, f32)> = None;
+    for i in 0..=steps {
+        let period = lo as f64 + (hi - lo) as f64 * i as f64 / steps.max(1) as f64;
+        let (mut re, mut im) = (0.0f64, 0.0f64);
+        for &(pos, offset) in samples {
+            let phase = std::f64::consts::TAU * ((pos - min) as f64 / period + offset as f64);
+            re += phase.cos();
+            im += phase.sin();
+        }
+        let strength = re.hypot(im);
+        if best.is_none_or(|(b, _, _)| strength > b) {
+            let origin = min as f64 + im.atan2(re) / std::f64::consts::TAU * period;
+            best = Some((strength, period as f32, origin as f32));
+        }
+    }
+    best.map(|(_, period, origin)| (period, origin))
 }
 
 /// Represents a detected triangle region
@@ -2108,22 +2499,6 @@ fn sample_region_is_dark(img: &GrayImage, cx: f32, cy: f32, radius: u32) -> bool
     total > 0 && dark * 2 > total
 }
 
-/// Convert a detected triangle's pixel centroid to the bounding-box center of its grid cell.
-/// Due to triangle geometry, the pixel centroid is offset from the bbox center by ±h/6:
-///   pointing-down: centroid at h/3 from top  → bbox_center_y = centroid_y + h/6
-///   pointing-up:   centroid at 2h/3 from top → bbox_center_y = centroid_y - h/6
-/// The x-coordinate is symmetric, so centroid_x == bbox_center_x.
-fn centroid_to_bbox_center(triangle: &Triangle) -> (f32, f32) {
-    let h = (triangle.max_y - triangle.min_y + 1) as f32;
-    let correction = h / 6.0;
-    let bbox_cy = if triangle.pointing_up {
-        triangle.center_y - correction
-    } else {
-        triangle.center_y + correction
-    };
-    (triangle.center_x, bbox_cy)
-}
-
 /// Tries every unmixed variant of `bits` until Reed-Solomon decoding and
 /// payload unpacking succeed.
 fn try_unmix_decode(bits: &[u8], width_squares: usize) -> Result<(String, String), String> {
@@ -2137,37 +2512,26 @@ fn try_unmix_decode(bits: &[u8], width_squares: usize) -> Result<(String, String
     Err(last_err)
 }
 
-/// Read bits from the image by sampling the pixel color at the center of each
-/// grid cell.  The orientation-mark cells (first/last row, first 2 and last 2
+/// Read bits from the image by sampling the pixel color at the centroid of each
+/// grid cell's triangle.  The orientation-mark cells (first/last row, first 2 and last 2
 /// columns) are skipped — they are not data bits.  Returns the data bits packed
 /// into bytes (MSB first).
 fn read_bits_from_grid(
     img: &GrayImage,
     row_count: usize,
     column_count: usize,
-    anchors: &Anchors,
+    lattice: &Lattice,
 ) -> (Vec<u8>, usize) {
     if row_count < 2 || column_count < 2 {
         return (Vec::new(), 0);
     }
 
-    // Convert pixel centroids → bounding-box cell centers using the named anchor fields.
-    let (tl_cx, tl_cy) = centroid_to_bbox_center(&anchors.top_left);
-    let (tr_cx, _tr_cy) = centroid_to_bbox_center(&anchors.top_right);
-    let (_bl_cx, bl_cy) = centroid_to_bbox_center(&anchors.bottom_left);
-
-    let cols_f = (column_count - 1) as f32;
-    let rows_f = (row_count - 1) as f32;
-
-    let step_x = (tr_cx - tl_cx) / cols_f;
-    let step_y = (bl_cy - tl_cy) / rows_f;
-
-    // Sampling radius: ~15% of the step to stay well inside the triangle body
-    let sample_radius = ((step_x * 0.15).round() as u32).max(2);
+    // Sampling radius: ~15% of the column step to stay well inside the triangle body
+    let sample_radius = ((lattice.col_pitch * 0.15).round() as u32).max(2);
 
     eprintln!(
         "DEBUG grid: origin=({:.1},{:.1}) step=({:.1},{:.1}) radius={}",
-        tl_cx, tl_cy, step_x, step_y, sample_radius
+        lattice.x0[0], lattice.y0[0], lattice.col_pitch, lattice.row_pitch, sample_radius
     );
 
     let mut bits: Vec<bool> = Vec::new();
@@ -2184,8 +2548,7 @@ fn read_bits_from_grid(
                 continue;
             }
 
-            let cx = tl_cx + col as f32 * step_x;
-            let cy = tl_cy + row as f32 * step_y;
+            let (cx, cy) = lattice.centroid(row, col);
 
             bits.push(sample_region_is_dark(img, cx, cy, sample_radius));
         }
@@ -2264,5 +2627,267 @@ fn draw_rectangles(
     // Draw anchors in red on top with a thicker border so they stand out
     for t in anchors.all() {
         draw_box(img, t, red, border_width * 2);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::imageops::{FilterType, resize};
+
+    const STYLES: [ImageStyle; 3] = [ImageStyle::Tiles, ImageStyle::Stain, ImageStyle::Horizon];
+    const RATIOS: [(u32, u32); 3] = [(1, 1), (16, 9), (3, 4)];
+    /// Kept small: triangle detection is slow in debug builds.
+    const PAYLOAD_LENGTHS: [usize; 3] = [5, 40, 150];
+
+    fn payload(len: usize) -> String {
+        (0..len).map(|i| (b'a' + (i % 26) as u8) as char).collect()
+    }
+
+    fn generate(style: ImageStyle, ratio: (u32, u32), len: usize) -> GenerateDebug {
+        generate_image_debug(GenerateImageParams {
+            payload: &payload(len),
+            payload_type: "text",
+            width_ratio: ratio.0,
+            height_ratio: ratio.1,
+            style,
+            fg_color: 0xFF000000,
+            bg_color: 0xFFFFFFFF,
+            horizon_seed: 42,
+        })
+        .expect("generation failed")
+    }
+
+    /// Every style × ratio × payload length, with a label for assertion messages.
+    fn all_cases() -> impl Iterator<Item = (String, usize, GenerateDebug)> {
+        STYLES.into_iter().flat_map(|style| {
+            RATIOS.into_iter().flat_map(move |ratio| {
+                PAYLOAD_LENGTHS.into_iter().map(move |len| {
+                    let label = format!("{:?} {:?} len={}", style, ratio, len);
+                    (label, len, generate(style, ratio, len))
+                })
+            })
+        })
+    }
+
+    fn rescale(png: &[u8], factor: f32) -> Vec<u8> {
+        let img = image::load_from_memory(png)
+            .expect("load failed")
+            .to_rgba8();
+        let width = (img.width() as f32 * factor).round() as u32;
+        let height = (img.height() as f32 * factor).round() as u32;
+        let scaled = resize(&img, width, height, FilterType::Triangle);
+        let mut out = Vec::new();
+        PngEncoder::new(&mut out)
+            .write_image(scaled.as_raw(), width, height, ExtendedColorType::Rgba8)
+            .expect("encode failed");
+        out
+    }
+
+    fn assert_decodes_exactly(label: &str, len: usize, truth: (usize, usize), png: &[u8]) {
+        let decoded = decode_image(png).expect("decode errored");
+        assert_eq!(
+            (decoded.row_count, decoded.column_count),
+            truth,
+            "{label}: wrong grid"
+        );
+        assert_eq!(
+            decoded.decode_method, "lattice-fit",
+            "{label}: needed a search"
+        );
+        assert_eq!(
+            decoded.text.as_deref(),
+            Some(payload(len).as_str()),
+            "{label}: wrong text"
+        );
+    }
+
+    fn grid_of(generated: &GenerateDebug) -> (usize, usize) {
+        (
+            generated.grid_rows as usize,
+            generated.grid_columns as usize,
+        )
+    }
+
+    /// Committed decode fixtures, named `{style}_{w}x{h}_len{len}_{rows}x{cols}.png`. They pin
+    /// the decoder against images from a known renderer, so a renderer change can't hide a
+    /// decoder regression.
+    const FIXTURES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/decode");
+    const FIXTURE_PAYLOAD_LENGTHS: [usize; 4] = [5, 40, 150, 400];
+
+    /// Rewrites the fixtures from the current renderer. Only run after an intentional format change:
+    /// `tricode-regen-fixtures` (or `cargo test -p tricode --release -- --ignored regenerate_decode_fixtures`)
+    #[test]
+    #[ignore]
+    fn regenerate_decode_fixtures() {
+        std::fs::create_dir_all(FIXTURES_DIR).expect("create fixtures dir");
+        for style in STYLES {
+            for ratio in RATIOS {
+                for len in FIXTURE_PAYLOAD_LENGTHS {
+                    let generated = generate(style, ratio, len);
+                    let name = format!(
+                        "{}_{}x{}_len{}_{}x{}.png",
+                        format!("{:?}", style).to_lowercase(),
+                        ratio.0,
+                        ratio.1,
+                        len,
+                        generated.grid_rows,
+                        generated.grid_columns
+                    );
+                    std::fs::write(
+                        format!("{FIXTURES_DIR}/{name}"),
+                        to_grayscale_png(&generated.png_bytes),
+                    )
+                    .expect("write fixture");
+                }
+            }
+        }
+    }
+
+    /// Re-encodes a rendered (pure black and white) PNG as 8-bit grayscale, which the decoder
+    /// sees identically but takes about a fifth of the space.
+    fn to_grayscale_png(png: &[u8]) -> Vec<u8> {
+        let gray = image::load_from_memory(png)
+            .expect("load failed")
+            .to_luma8();
+        let mut out = Vec::new();
+        PngEncoder::new_with_quality(
+            &mut out,
+            image::codecs::png::CompressionType::Best,
+            image::codecs::png::FilterType::Adaptive,
+        )
+        .write_image(
+            gray.as_raw(),
+            gray.width(),
+            gray.height(),
+            ExtendedColorType::L8,
+        )
+        .expect("encode failed");
+        out
+    }
+
+    /// Parses `{style}_{w}x{h}_len{len}_{rows}x{cols}.png` into `(len, (rows, cols))`.
+    fn parse_fixture_name(name: &str) -> Option<(usize, (usize, usize))> {
+        let mut parts = name.strip_suffix(".png")?.split('_');
+        let len = parts.nth(2)?.strip_prefix("len")?.parse().ok()?;
+        let (rows, cols) = parts.next()?.split_once('x')?;
+        Some((len, (rows.parse().ok()?, cols.parse().ok()?)))
+    }
+
+    #[test]
+    fn decodes_fixtures() {
+        let mut names: Vec<String> = std::fs::read_dir(FIXTURES_DIR)
+            .expect("fixtures dir missing")
+            .map(|entry| {
+                entry
+                    .expect("read fixtures dir")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name.ends_with(".png"))
+            .collect();
+        names.sort();
+        assert_eq!(
+            names.len(),
+            STYLES.len() * RATIOS.len() * FIXTURE_PAYLOAD_LENGTHS.len(),
+            "fixture count"
+        );
+        for name in names {
+            let (len, truth) = parse_fixture_name(&name).expect("bad fixture name");
+            let png = std::fs::read(format!("{FIXTURES_DIR}/{name}")).expect("read fixture");
+            assert_decodes_exactly(&name, len, truth, &png);
+        }
+    }
+
+    #[test]
+    fn lattice_fit_survives_non_integer_scaling() {
+        for factor in [0.8, 1.37] {
+            for style in STYLES {
+                let len = 150;
+                let generated = generate(style, (16, 9), len);
+                let label = format!("{:?} ×{}", style, factor);
+                assert_decodes_exactly(
+                    &label,
+                    len,
+                    grid_of(&generated),
+                    &rescale(&generated.png_bytes, factor),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn misfit_ranks_true_grid_first() {
+        for (label, _, generated) in all_cases() {
+            let gray = image::load_from_memory(&generated.png_bytes)
+                .expect("load failed")
+                .to_luma8();
+            let triangles = find_triangles(&gray).expect("no triangles");
+            let anchors = find_anchors(&triangles).expect("no anchors");
+            let triangles = discard_merged_triangles(triangles, &anchors);
+            // Without a fitted lattice, so only the anchor-spanned lattices are ranked.
+            let ctx = GridContext {
+                triangles: &triangles,
+                anchors: &anchors,
+                row_naive: 0,
+                col_naive: 0,
+                fit: None,
+            };
+            let truth = grid_of(&generated);
+            let off_estimate = (truth.0 + 3, truth.1 - 4);
+            let ranked = with_neighbourhood(&ctx, off_estimate);
+            assert_eq!(ranked.first(), Some(&truth), "{label}");
+        }
+    }
+
+    #[test]
+    fn dominant_period_recovers_sub_pixel_pitch() {
+        // Every third lattice point missing, positions jittered by up to ±1px.
+        let samples: Vec<(f32, f32)> = (0..200)
+            .filter(|k| k % 3 != 0)
+            .map(|k| {
+                (
+                    7.3 + k as f32 * 25.4 + ((k * 7919) % 21) as f32 / 10.0 - 1.0,
+                    0.0,
+                )
+            })
+            .collect();
+        let (period, origin) = dominant_period(&samples, 20.0, 40.0).expect("no period");
+        assert!((period - 25.4).abs() < 0.01, "period {period}");
+        let k = (origin - 7.3) / 25.4;
+        assert!((k - k.round()).abs() < 0.05, "origin {origin}");
+    }
+
+    #[test]
+    fn anchor_lattice_accounts_for_bottom_left_orientation() {
+        let anchor = |cx: f32, cy: f32, pointing_up: bool| Triangle {
+            center_x: cx,
+            center_y: cy,
+            area: 0.0,
+            is_black: true,
+            pointing_up,
+            min_x: 0,
+            min_y: 0,
+            max_x: 0,
+            max_y: 0,
+        };
+        // 3 rows: the bottom-left cell (2, 0) points down, at exactly 2 pitches.
+        let anchors = Anchors {
+            top_left: anchor(10.0, 15.0, false),
+            top_right: anchor(110.0, 15.0, false),
+            bottom_left: anchor(10.0, 105.0, false),
+            bottom_right: anchor(110.0, 105.0, false),
+        };
+        let lattice = Lattice::from_anchors(&anchors, 3, 5);
+        assert_eq!((lattice.col_pitch, lattice.row_pitch), (25.0, 45.0));
+        // 4 rows: the bottom-left cell (3, 0) points up, a third of a pitch lower than 3 pitches.
+        let anchors = Anchors {
+            bottom_left: anchor(10.0, 15.0 + 3.0 * 45.0 + 15.0, true),
+            ..anchors
+        };
+        let lattice = Lattice::from_anchors(&anchors, 4, 5);
+        assert!((lattice.row_pitch - 45.0).abs() < 1e-4);
+        assert!((lattice.centroid(1, 0).1 - (15.0 + 45.0 + 15.0)).abs() < 1e-4);
     }
 }
