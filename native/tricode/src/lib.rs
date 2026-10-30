@@ -457,241 +457,252 @@ pub fn generate_image_debug(params: GenerateImageParams<'_>) -> Result<GenerateD
     create_image_from_binary_data(&encoded_data, &params)
 }
 
-/// For horizon style there is notation introduced, so each triangle is divided into:
+/// The triangle grid in pixel coordinates, shared by every cell so that neighbouring triangles
+/// are cut from the same lines.
 ///
-/// ```text
-///                 / \
-///                /   \
-///                -----
-///              / \   / \
-///             /   \ /   \
-///            /           \
-///           /     / \     \
-///          /     /   \     \
-///         /     /     \     \
-///        /     /       \     \
-///       /     /         \     \
-///      /     /           \     \
-///     /     /             \     \
-///     ----- --------------- -----
-///   / \   /                 \   / \
-///  /   \ /                   \ /   \
-///  ----- --------------------- -----
-/// ```
-///
-/// And those regions stay in context of base (so left tip may not be left on the image, if triangle
-/// is pointing down).
-///
-/// Those region are related to surrounding triangles, the interesting X trinalge is our context:
-///
-/// ```text
-///  ------- -------
-///  \     /.\     /
-///   \   /...\   /
-///    \ /..X..\ /
-///      -------
-///      \     /
-///       \   /
-///        \ /
-/// ```
-///
-/// Creates a PNG image from binary data maintaining the specified aspect ratio.
-/// Binary data is encoded as: 0 bits = background color, 1 bits = foreground color.
-/// Each bit is represented by a 4x4 square of pixels.
-/// Holds pre-computed constants for triangle rendering, avoiding repeated calculations in loops
-struct TriangleRenderConstants {
-    w: f64,
-    center_x: f64,
-    denom: f64,
-    slope: f64,
+/// Vertices sit on pixel centres horizontally (`col_pitch` apart, so a triangle's base spans
+/// `2 · col_pitch + 1` pixels: the odd triangle width) and on the boundaries between pixel rows
+/// vertically, so rows split the image cleanly. Every slanted edge therefore lies on one straight
+/// line across all rows, and a shared edge is rounded identically from both sides.
+struct TriangleGrid {
+    rows: i64,
+    cols: i64,
+    col_pitch: f64,
+    row_pitch: f64,
+    /// x of column 0's left vertex.
+    origin_x: f64,
+    /// y of the line above row 0.
+    origin_y: f64,
 }
 
-impl TriangleRenderConstants {
-    fn new(pixels_per_bit_width: u32, pixels_per_bit_height: u32) -> Self {
-        let w = pixels_per_bit_width as f64;
-        let h = pixels_per_bit_height as f64;
+impl TriangleGrid {
+    fn new(rows: u32, cols: u32, triangle_width: u32) -> Self {
+        let triangle_height = triangle_height(triangle_width);
         Self {
-            w,
-            center_x: (w - 1.0) / 2.0,
-            denom: (h - 1.0).max(1.0),
-            slope: 2.0 * h / w,
+            rows: rows as i64,
+            cols: cols as i64,
+            col_pitch: (triangle_width / 2) as f64,
+            row_pitch: triangle_height as f64,
+            origin_x: (triangle_width / 2) as f64,
+            origin_y: (triangle_height / 2) as f64 - 0.5,
         }
     }
-}
 
-/// Pre-computed corner tip positions for triangle rendering
-struct TriangleCorners {
-    left_tip_x: u32,
-    left_tip_y: u32,
-    right_tip_x: u32,
-    right_tip_y: u32,
-}
-
-impl TriangleCorners {
-    fn new(
-        pointing_down: bool,
-        pixels_per_bit_width: u32,
-        pixels_per_bit_height: u32,
-        border_thickness: f64,
-    ) -> Self {
-        if pointing_down {
-            Self {
-                left_tip_x: pixels_per_bit_width - border_thickness as u32,
-                left_tip_y: 0,
-                right_tip_x: border_thickness as u32,
-                right_tip_y: 0,
-            }
+    /// The cell containing the point, which may lie outside the grid.
+    fn cell_at(&self, x: f64, y: f64) -> (i64, i64) {
+        let v = (y - self.origin_y) / self.row_pitch;
+        let row = v.floor() as i64;
+        let t = v - row as f64; // 0 at the row's top line, 1 at its bottom line
+        let u = (x - self.origin_x) / self.col_pitch;
+        // Column strip k (between vertices k and k+1) holds the edge between cells k-1 and k.
+        let strip = u.floor() as i64;
+        let left = strip - 1;
+        let edge = if points_down_i(row, left) {
+            (strip + 1) as f64 - t
         } else {
-            Self {
-                left_tip_x: border_thickness as u32,
-                left_tip_y: pixels_per_bit_height,
-                right_tip_x: pixels_per_bit_width - border_thickness as u32,
-                right_tip_y: pixels_per_bit_height,
-            }
-        }
-    }
-}
-
-/// Pre-computed neighbor information for Horizon style rendering
-struct NeighborInfo {
-    bottom: bool,
-    left: bool,
-    right: bool,
-}
-
-impl NeighborInfo {
-    fn compute(
-        has_group: bool,
-        pointing_down: bool,
-        square_x: u32,
-        square_y: u32,
-        width_squares: u32,
-        height_squares: u32,
-        horizon_layout: &Option<HorizonLayout>,
-    ) -> Self {
-        if !has_group {
-            return Self {
-                bottom: false,
-                left: false,
-                right: false,
-            };
-        }
-
-        let current_group = horizon_layout
-            .as_ref()
-            .and_then(|hl| hl.group_id[square_y as usize][square_x as usize]);
-
-        let bottom = Self::check_bottom_neighbor(
-            pointing_down,
-            square_y,
-            square_x,
-            height_squares,
-            current_group,
-            horizon_layout,
-        );
-
-        let left = Self::check_left_neighbor(
-            pointing_down,
-            square_x,
-            square_y,
-            width_squares,
-            current_group,
-            horizon_layout,
-        );
-
-        let right = Self::check_right_neighbor(
-            pointing_down,
-            square_x,
-            square_y,
-            width_squares,
-            current_group,
-            horizon_layout,
-        );
-
-        Self {
-            bottom,
-            left,
-            right,
-        }
-    }
-
-    fn check_bottom_neighbor(
-        pointing_down: bool,
-        square_y: u32,
-        square_x: u32,
-        height_squares: u32,
-        current_group: Option<usize>,
-        horizon_layout: &Option<HorizonLayout>,
-    ) -> bool {
-        let adjacent_y = if pointing_down {
-            if square_y == 0 {
-                return false;
-            }
-            square_y - 1
-        } else {
-            if square_y >= height_squares - 1 {
-                return false;
-            }
-            square_y + 1
+            strip as f64 + t
         };
+        (row, if u < edge { left } else { strip })
+    }
 
-        horizon_layout.as_ref().is_some_and(|hl| {
-            let adjacent_group = hl.group_id[adjacent_y as usize][square_x as usize];
-            current_group.is_some() && current_group == adjacent_group
+    /// Corners of a cell's triangle.
+    fn vertices(&self, row: i64, col: i64) -> [(f64, f64); 3] {
+        let left = self.origin_x + col as f64 * self.col_pitch;
+        let (mid, right) = (left + self.col_pitch, left + 2.0 * self.col_pitch);
+        let top = self.origin_y + row as f64 * self.row_pitch;
+        let bottom = top + self.row_pitch;
+        if points_down_i(row, col) {
+            [(left, top), (right, top), (mid, bottom)]
+        } else {
+            [(mid, top), (right, bottom), (left, bottom)]
+        }
+    }
+
+    /// Lattice coordinates `(k, line)` of a vertex: its column of vertices and its row line.
+    fn vertex_index(&self, (x, y): (f64, f64)) -> (i64, i64) {
+        (
+            ((x - self.origin_x) / self.col_pitch).round() as i64,
+            ((y - self.origin_y) / self.row_pitch).round() as i64,
+        )
+    }
+
+    fn vertex_at(&self, (k, line): (i64, i64)) -> (f64, f64) {
+        (
+            self.origin_x + k as f64 * self.col_pitch,
+            self.origin_y + line as f64 * self.row_pitch,
+        )
+    }
+
+    /// The six edges leaving a vertex, clockwise on screen from east: as offsets to the vertex at
+    /// the far end, in vertex coordinates.
+    const RAYS: [(i64, i64); 6] = [(2, 0), (1, 1), (-1, 1), (-2, 0), (-1, -1), (1, -1)];
+
+    /// The six cells around a vertex; cell `i` lies clockwise of ray `i` (between rays `i` and
+    /// `i + 1`).
+    fn cells_around((k, line): (i64, i64)) -> [(i64, i64); 6] {
+        [
+            (line, k),
+            (line, k - 1),
+            (line, k - 2),
+            (line - 1, k - 2),
+            (line - 1, k - 1),
+            (line - 1, k),
+        ]
+    }
+
+    fn ray_vector(&self, ray: usize) -> (f64, f64) {
+        let (dk, dline) = Self::RAYS[ray];
+        (dk as f64 * self.col_pitch, dline as f64 * self.row_pitch)
+    }
+
+    /// Whether a point inside `(row, col)` lies on a border: within `width` of an edge between
+    /// its shape and another, on its own side.
+    ///
+    /// Each edge's border is a strip cut off at both ends by the line halving the corner there
+    /// (a mitre join, as when stroking a polygon outline). At outward corners the strips meet and
+    /// cut the corner off cleanly; at inward ones they meet in a sharp point instead of the round
+    /// fillet that measuring to the nearest point of another shape would give.
+    fn on_border(
+        &self,
+        (x, y): (f64, f64),
+        (row, col): (i64, i64),
+        width: f64,
+        shape_of: impl Fn(i64, i64) -> Option<usize>,
+    ) -> bool {
+        let corners = self.vertices(row, col);
+        // A strip within reach has to come within `width` of this cell's own edges first.
+        let near_own_edge =
+            (0..3).any(|i| distance_to_segment((x, y), corners[i], corners[(i + 1) % 3]) < width);
+        if !near_own_edge {
+            return false;
+        }
+
+        let own = shape_of(row, col);
+        let in_shape = |(r, c): (i64, i64)| shape_of(r, c) == own;
+        // Every edge within reach leaves one of this cell's corners.
+        corners.iter().any(|&corner| {
+            let vertex = self.vertex_index(corner);
+            let around = Self::cells_around(vertex);
+            (0..6).any(|ray| {
+                // The edge separates the shape from another when exactly one side is in it.
+                let clockwise_in = in_shape(around[ray]);
+                if clockwise_in == in_shape(around[(ray + 5) % 6]) {
+                    return false;
+                }
+                let (dx, dy) = self.ray_vector(ray);
+                let (px, py) = (x - corner.0, y - corner.1);
+                // On the shape's side of the edge, and within `width` of its line.
+                let cross = dx * py - dy * px;
+                if (cross > 0.0) != clockwise_in || cross.abs() / dx.hypot(dy) >= width {
+                    return false;
+                }
+                let far =
+                    self.vertex_at((vertex.0 + Self::RAYS[ray].0, vertex.1 + Self::RAYS[ray].1));
+                self.within_mitre((x, y), vertex, ray, clockwise_in, &in_shape)
+                    && self.within_mitre(
+                        (x, y),
+                        self.vertex_index(far),
+                        (ray + 3) % 6,
+                        !clockwise_in,
+                        &in_shape,
+                    )
+            })
         })
     }
 
-    fn check_left_neighbor(
-        pointing_down: bool,
-        square_x: u32,
-        square_y: u32,
-        width_squares: u32,
-        current_group: Option<usize>,
-        horizon_layout: &Option<HorizonLayout>,
+    /// Whether the point lies on the edge's side of the line halving the shape's corner at
+    /// `vertex`, where the edge is `ray` and the shape is on its clockwise side if `clockwise`.
+    fn within_mitre(
+        &self,
+        (x, y): (f64, f64),
+        vertex: (i64, i64),
+        ray: usize,
+        clockwise: bool,
+        in_shape: &impl Fn((i64, i64)) -> bool,
     ) -> bool {
-        let adjacent_x = if pointing_down {
-            if square_x >= width_squares - 1 {
-                return false;
+        let around = Self::cells_around(vertex);
+        // How many 60° sectors the shape's corner spans, starting next to the edge.
+        let sector = |step: usize| {
+            if clockwise {
+                (ray + step) % 6
+            } else {
+                (ray + 6 - 1 - step) % 6
             }
-            square_x + 1
-        } else {
-            if square_x == 0 {
-                return false;
-            }
-            square_x - 1
         };
-
-        horizon_layout.as_ref().is_some_and(|hl| {
-            let adjacent_group = hl.group_id[square_y as usize][adjacent_x as usize];
-            current_group.is_some() && current_group == adjacent_group
-        })
-    }
-
-    fn check_right_neighbor(
-        pointing_down: bool,
-        square_x: u32,
-        square_y: u32,
-        width_squares: u32,
-        current_group: Option<usize>,
-        horizon_layout: &Option<HorizonLayout>,
-    ) -> bool {
-        let adjacent_x = if pointing_down {
-            if square_x == 0 {
-                return false;
-            }
-            square_x - 1
+        let span = (0..6)
+            .take_while(|&step| in_shape(around[sector(step)]))
+            .count();
+        let other_ray = if clockwise {
+            (ray + span) % 6
         } else {
-            if square_x >= width_squares - 1 {
-                return false;
-            }
-            square_x + 1
+            (ray + 6 - span % 6) % 6
         };
-
-        horizon_layout.as_ref().is_some_and(|hl| {
-            let adjacent_group = hl.group_id[square_y as usize][adjacent_x as usize];
-            current_group.is_some() && current_group == adjacent_group
-        })
+        let unit = |(dx, dy): (f64, f64)| {
+            let length = dx.hypot(dy);
+            (dx / length, dy / length)
+        };
+        let (ax, ay) = unit(self.ray_vector(ray));
+        let (bx, by) = unit(self.ray_vector(other_ray));
+        // The halving line's direction: through the shape for corners under 180°, out of it
+        // (pointing away from both edges) for wider ones.
+        let (hx, hy) = match span {
+            0..=2 => (ax + bx, ay + by),
+            3 => {
+                if clockwise {
+                    (-ay, ax)
+                } else {
+                    (ay, -ax)
+                }
+            }
+            _ => (-(ax + bx), -(ay + by)),
+        };
+        let (vx, vy) = self.vertex_at(vertex);
+        let side = |(px, py): (f64, f64)| hx * py - hy * px;
+        side((x - vx, y - vy)) * side((ax, ay)) >= 0.0
     }
+}
+
+/// [`points_down`] for cell indices that may lie outside the grid.
+fn points_down_i(row: i64, col: i64) -> bool {
+    (row + col).rem_euclid(2) == 0
+}
+
+fn distance_to_segment((px, py): (f64, f64), (ax, ay): (f64, f64), (bx, by): (f64, f64)) -> f64 {
+    let (dx, dy) = (bx - ax, by - ay);
+    let t = (((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+    (px - ax - t * dx).hypot(py - ay - t * dy)
+}
+
+/// Which drawn shape each cell belongs to; `None` for background cells. Pixels within the border
+/// width of a different shape (or of the background) are left blank, so every shape is drawn
+/// shrunk by the border and separated from its neighbours.
+fn cell_shapes(
+    cells: &[Vec<bool>],
+    style: ImageStyle,
+    horizon_layout: Option<&HorizonLayout>,
+) -> Vec<Vec<Option<usize>>> {
+    let cols = cells.first().map_or(0, Vec::len);
+    // Each cell on its own gets a unique id; joined Horizon groups share one past those.
+    let singles = cells.len() * cols;
+    cells
+        .iter()
+        .enumerate()
+        .map(|(row, cells_in_row)| {
+            cells_in_row
+                .iter()
+                .enumerate()
+                .map(|(col, &is_fg)| {
+                    is_fg.then(|| match style {
+                        ImageStyle::Stain => 0,
+                        ImageStyle::Tiles => row * cols + col,
+                        ImageStyle::Horizon => horizon_layout
+                            .and_then(|hl| hl.group_id[row][col])
+                            .map_or(row * cols + col, |group| singles + group),
+                    })
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Applies a 2D bitmask (tiled over the grid) to `data` via XOR.
@@ -887,7 +898,6 @@ fn create_image_from_binary_data(
     } = *params;
     let fg = argb_to_rgba(params.fg_color, true);
     let bg = argb_to_rgba(params.bg_color, false);
-    let pixels_per_bit_height = triangle_height(triangle_width);
 
     // Calculate total bits needed, we add 8 bits for border marks
     let total_bits = (encoded_data.len() + 1) * 8;
@@ -927,28 +937,20 @@ fn create_image_from_binary_data(
         None
     };
 
-    // Calculate padding
-    let padding_x = triangle_width / 2;
-    let padding_y = pixels_per_bit_height / 2;
-
     // Actual pixel dimensions (including padding)
     let (width, height) = image_size(width_squares, height_squares, triangle_width);
 
-    let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::new(width, height);
+    let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::from_pixel(width, height, bg);
 
-    // Fill with background color
-    for pixel in img.pixels_mut() {
-        *pixel = bg;
-    }
-
-    // Pre-compute border thickness once. It scales with the triangle (never below 1 px), so a
-    // larger triangle width enlarges the whole image rather than thinning the borders.
+    // Border width on each side of an edge, measured perpendicular to it. It scales with the
+    // triangle (never below 1 px), so a larger triangle width enlarges the whole image rather than
+    // thinning the borders.
     let border_at_reference: f64 = match style {
         ImageStyle::Horizon => 3.0,
         ImageStyle::Tiles => 1.0,
         ImageStyle::Stain => 0.0,
     };
-    let border_thickness = if border_at_reference == 0.0 {
+    let border = if border_at_reference == 0.0 {
         0.0
     } else {
         (border_at_reference * triangle_width as f64 / BORDER_REFERENCE_WIDTH)
@@ -956,198 +958,28 @@ fn create_image_from_binary_data(
             .max(1.0)
     };
 
-    // Pre-compute triangle rendering constants once
-    let tri_constants = TriangleRenderConstants::new(triangle_width, pixels_per_bit_height);
+    let grid = TriangleGrid::new(height_squares, width_squares, triangle_width);
+    let shapes = cell_shapes(
+        &layout_cells(&data, height_squares, width_squares),
+        style,
+        horizon_layout.as_ref(),
+    );
+    let shape_of = |row: i64, col: i64| -> Option<usize> {
+        if row < 0 || col < 0 || row >= grid.rows || col >= grid.cols {
+            return None;
+        }
+        shapes[row as usize][col as usize]
+    };
 
-    // Fill image with encoded data bits (each bit as a triangle)
-    let mut bit_index = 0;
-    for square_y in 0..height_squares {
-        for square_x in 0..width_squares {
-            // Check if this is an orientation mark position
-            let is_first_row = square_y == 0;
-            let is_last_row = square_y == height_squares - 1;
-            let is_first_col = square_x == 0;
-            let is_second_col = square_x == 1;
-            let is_before_last_col = square_x == width_squares.saturating_sub(2);
-            let is_last_col = square_x == width_squares - 1;
-
-            let bit = if (is_first_row || is_last_row) && (is_first_col || is_last_col) {
-                // Orientation marks: 1st and last positions are always 1 (black)
-                1
-            } else if (is_first_row || is_last_row) && (is_second_col || is_before_last_col) {
-                // Orientation marks: 2nd and before-last positions are always 0 (white)
-                0
-            } else {
-                // Normal data bit
-                let byte_index = bit_index / 8;
-                if byte_index < data.len() {
-                    let bit_offset = 7 - (bit_index % 8); // MSB first
-                    let bit_value = (data[byte_index] >> bit_offset) & 1;
-                    bit_index += 1;
-                    bit_value
-                } else {
-                    0 // Fill remaining squares with 0 (white)
-                }
-            };
-
-            // 0 = background, 1 = foreground
-            let rgba = if bit == 1 { fg } else { bg };
-
-            if bit == 1 {
-                // Determine triangle orientation once per square
-                let mut pointing_down = square_x % 2 == 0;
-                if square_y % 2 == 1 {
-                    pointing_down = !pointing_down;
-                }
-
-                // Pre-compute corner tip positions once per triangle
-                let corners = TriangleCorners::new(
-                    pointing_down,
-                    triangle_width,
-                    pixels_per_bit_height,
-                    border_thickness,
-                );
-
-                // Pre-compute neighbor info once for Horizon style
-                let neighbors = if style == ImageStyle::Horizon {
-                    let has_group = horizon_layout.as_ref().is_some_and(|hl| {
-                        hl.group_id[square_y as usize][square_x as usize].is_some()
-                    });
-                    NeighborInfo::compute(
-                        has_group,
-                        pointing_down,
-                        square_x,
-                        square_y,
-                        width_squares,
-                        height_squares,
-                        &horizon_layout,
-                    )
-                } else {
-                    NeighborInfo {
-                        bottom: false,
-                        left: false,
-                        right: false,
-                    }
-                };
-
-                // Check if we have a group for Horizon style (computed once)
-                let has_group = style == ImageStyle::Horizon
-                    && horizon_layout.as_ref().is_some_and(|hl| {
-                        hl.group_id[square_y as usize][square_x as usize].is_some()
-                    });
-
-                // Render triangle pixel by pixel
-                for dy in 0..pixels_per_bit_height {
-                    let y = dy as f64;
-                    let t = y / tri_constants.denom;
-
-                    let half_width = if pointing_down {
-                        (tri_constants.w / 2.0) * (1.0 - t)
-                    } else {
-                        (tri_constants.w / 2.0) * t
-                    };
-
-                    // Pre-compute border checks for this row
-                    let is_top_tip = if pointing_down {
-                        dy >= pixels_per_bit_height - border_thickness as u32
-                    } else {
-                        dy < border_thickness as u32
-                    };
-
-                    let is_base_region = if pointing_down {
-                        dy < border_thickness as u32
-                    } else {
-                        dy >= pixels_per_bit_height - border_thickness as u32
-                    };
-
-                    for dx in 0..triangle_width {
-                        let x = dx as f64;
-
-                        if (x - tri_constants.center_x).abs() <= half_width {
-                            let base_x = square_x * (triangle_width / 2);
-                            let px = padding_x + base_x + dx;
-                            let py = padding_y + square_y * pixels_per_bit_height + dy;
-
-                            // Determine which sides the pixel belongs to
-                            let (left_edge, right_edge) = if pointing_down {
-                                (
-                                    tri_constants.center_x + half_width,
-                                    tri_constants.center_x - half_width,
-                                )
-                            } else {
-                                (
-                                    tri_constants.center_x - half_width,
-                                    tri_constants.center_x + half_width,
-                                )
-                            };
-
-                            let is_left_border = if pointing_down {
-                                left_edge - x <= border_thickness
-                            } else {
-                                x - left_edge <= border_thickness
-                            };
-
-                            let is_right_border = if pointing_down {
-                                x - right_edge <= border_thickness
-                            } else {
-                                right_edge - x <= border_thickness
-                            };
-
-                            let is_border = is_base_region || is_left_border || is_right_border;
-
-                            let is_left_tip = if pointing_down {
-                                y < tri_constants.slope * (x - corners.left_tip_x as f64)
-                                    + corners.left_tip_y as f64
-                                    - 1.0
-                            } else {
-                                y >= tri_constants.slope * (x - corners.left_tip_x as f64)
-                                    + corners.left_tip_y as f64
-                            };
-
-                            let is_right_tip = if pointing_down {
-                                y <= -tri_constants.slope * (x - corners.right_tip_x as f64)
-                                    + corners.right_tip_y as f64
-                            } else {
-                                y >= -tri_constants.slope * (x - corners.right_tip_x as f64)
-                                    + corners.right_tip_y as f64
-                                    - 1.0
-                            };
-
-                            let is_top = is_right_border && is_left_border && !is_top_tip;
-                            let is_left = is_left_border && is_base_region && !is_left_tip;
-                            let is_right = is_right_border && is_base_region && !is_right_tip;
-                            let is_center = !is_border;
-                            let is_left_segment =
-                                is_left_border && !is_right_border && !is_base_region;
-                            let is_right_segment =
-                                is_right_border && !is_left_border && !is_base_region;
-                            let is_bottom_segment =
-                                is_base_region && !is_left_border && !is_right_border;
-
-                            // Determine if we should draw this pixel
-                            let should_draw = match style {
-                                ImageStyle::Horizon => {
-                                    is_center
-                                        || (has_group
-                                            && ((neighbors.left && is_left_segment)
-                                                || (neighbors.right && is_right_segment)
-                                                || (neighbors.left && neighbors.right && is_top)
-                                                || (neighbors.bottom && is_bottom_segment)
-                                                || (neighbors.left && neighbors.bottom && is_left)
-                                                || (neighbors.right
-                                                    && neighbors.bottom
-                                                    && is_right)))
-                                }
-                                _ => border_thickness == 0.0 || !is_border,
-                            };
-
-                            if should_draw {
-                                img.put_pixel(px, py, rgba);
-                            }
-                        }
-                    }
-                }
-            }
+    for (px, py, pixel) in img.enumerate_pixels_mut() {
+        let (x, y) = (px as f64, py as f64);
+        let (row, col) = grid.cell_at(x, y);
+        if shape_of(row, col).is_none() {
+            continue;
+        }
+        // Stay blank along the edges between this shape and any other.
+        if !(border > 0.0 && grid.on_border((x, y), (row, col), border, shape_of)) {
+            *pixel = fg;
         }
     }
 
@@ -3083,6 +2915,92 @@ mod tests {
         })
         .expect_err("a 40 kB payload fits");
         assert!(error.contains("shorten the payload"), "{error}");
+    }
+
+    #[test]
+    fn edges_follow_straight_grid_lines() {
+        // Stain has no borders, so every pixel takes the colour of the cell its centre lies in. The
+        // cells are cut by straight lines through the grid's vertices: horizontal lines between
+        // rows and slanted ones moving one column pitch per row. Away from those lines, the
+        // rendered image must match them exactly, also across row boundaries.
+        let triangle_width = MIN_TRIANGLE_WIDTH;
+        let generated = generate_at(ImageStyle::Stain, (16, 9), 150, triangle_width);
+        let img = image::load_from_memory(&generated.png_bytes)
+            .expect("load failed")
+            .to_luma8();
+        let (rows, cols) = grid_of(&generated);
+        let pitch = (triangle_width / 2) as f64;
+        let height = triangle_height(triangle_width) as f64;
+        let (origin_x, origin_y) = (pitch, (height / 2.0).floor() - 0.5);
+        let is_black = |x: f64, y: f64| img.get_pixel(x as u32, y as u32)[0] < 128;
+
+        let mut checked = 0;
+        for y in 0..img.height() {
+            let v = (y as f64 - origin_y) / height;
+            let row = v.floor();
+            let t = v - row;
+            if row < 0.0 || row >= rows as f64 || t * height < 0.5 || (1.0 - t) * height < 0.5 {
+                continue;
+            }
+            for x in 0..img.width() {
+                let u = (x as f64 - origin_x) / pitch;
+                // Horizontal distance to the nearest slanted line, in pixels.
+                let off_line = |w: f64| (w - w.round()).abs() * pitch;
+                if off_line(u - t) < 0.5 || off_line(u + t) < 0.5 {
+                    continue;
+                }
+                // The cell whose span in this pixel row contains the point.
+                let Some(col) = (0..cols).find(|&c| {
+                    let c = c as f64;
+                    let down = (row as usize + c as usize).is_multiple_of(2);
+                    let (from, to) = if down {
+                        (c + t, c + 2.0 - t)
+                    } else {
+                        (c + 1.0 - t, c + 1.0 + t)
+                    };
+                    (from..to).contains(&u)
+                }) else {
+                    continue;
+                };
+                // The cell's colour, read at its centroid.
+                let down = (row as usize + col).is_multiple_of(2);
+                let cx = origin_x + (col as f64 + 1.0) * pitch;
+                let cy = origin_y + (row + if down { 1.0 / 3.0 } else { 2.0 / 3.0 }) * height;
+                assert_eq!(
+                    is_black(x as f64, y as f64),
+                    is_black(cx.round(), cy.round()),
+                    "pixel ({x}, {y}) differs from cell ({row}, {col})"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 100_000, "only {checked} pixels checked");
+    }
+
+    #[test]
+    fn cells_around_a_vertex_match_the_cells_found_there() {
+        for triangle_width in [MIN_TRIANGLE_WIDTH, MAX_TRIANGLE_WIDTH] {
+            let grid = TriangleGrid::new(6, 9, triangle_width);
+            for line in 1..6 {
+                // Vertices on a line sit every other column, alternating between lines.
+                for k in (line % 2..10).step_by(2) {
+                    let (vx, vy) = grid.vertex_at((k, line));
+                    for (i, &cell) in TriangleGrid::cells_around((k, line)).iter().enumerate() {
+                        // A point a few pixels into the sector between rays i and i + 1.
+                        let (ax, ay) = grid.ray_vector(i);
+                        let (bx, by) = grid.ray_vector((i + 1) % 6);
+                        let (dx, dy) = (ax + bx, ay + by);
+                        let scale = 4.0 / dx.hypot(dy);
+                        let point = (vx + dx * scale, vy + dy * scale);
+                        assert_eq!(
+                            grid.cell_at(point.0, point.1),
+                            cell,
+                            "width {triangle_width}, vertex ({k}, {line}), sector {i}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
