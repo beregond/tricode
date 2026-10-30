@@ -86,6 +86,7 @@ use image::{ExtendedColorType, GrayImage, ImageBuffer, ImageEncoder, Rgba};
 use imageproc::contrast::{ThresholdType, threshold};
 use imageproc::distance_transform::Norm;
 use imageproc::morphology::dilate;
+use rayon::prelude::*;
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -971,17 +972,50 @@ fn create_image_from_binary_data(
         shapes[row as usize][col as usize]
     };
 
-    for (px, py, pixel) in img.enumerate_pixels_mut() {
-        let (x, y) = (px as f64, py as f64);
+    // Whether a point is painted: inside a shape and off its borders.
+    let painted = |x: f64, y: f64| -> bool {
         let (row, col) = grid.cell_at(x, y);
-        if shape_of(row, col).is_none() {
-            continue;
+        shape_of(row, col).is_some()
+            && !(border > 0.0 && grid.on_border((x, y), (row, col), border, shape_of))
+    };
+
+    // Anti-aliasing: a pixel whose corners and centre all agree is taken as fully painted or
+    // not; one the outline crosses is sampled on a grid and blended by the share painted. Corners
+    // are shared between neighbouring pixels, so they are computed a row at a time, and bands of
+    // rows are rendered in parallel.
+    let corner_row =
+        |y: f64| -> Vec<bool> { (0..=width).map(|px| painted(px as f64 - 0.5, y)).collect() };
+    let coverage = |x: f64, y: f64, corners: [bool; 4]| -> f64 {
+        let centre = painted(x, y);
+        if corners.iter().all(|&c| c == centre) {
+            return if centre { 1.0 } else { 0.0 };
         }
-        // Stay blank along the edges between this shape and any other.
-        if !(border > 0.0 && grid.on_border((x, y), (row, col), border, shape_of)) {
-            *pixel = fg;
-        }
-    }
+        let offset = |i: u32| (i as f64 + 0.5) / AA_SAMPLES as f64 - 0.5;
+        let hits = (0..AA_SAMPLES)
+            .flat_map(|i| (0..AA_SAMPLES).map(move |j| (i, j)))
+            .filter(|&(i, j)| painted(x + offset(i), y + offset(j)))
+            .count();
+        hits as f64 / (AA_SAMPLES * AA_SAMPLES) as f64
+    };
+    let row_bytes = width as usize * 4;
+    img.par_chunks_mut(row_bytes * BAND_ROWS)
+        .enumerate()
+        .for_each(|(band, rows)| {
+            let first_row = band * BAND_ROWS;
+            let mut above = corner_row(first_row as f64 - 0.5);
+            for (i, row) in rows.chunks_mut(row_bytes).enumerate() {
+                let y = (first_row + i) as f64;
+                let below = corner_row(y + 0.5);
+                for (px, pixel) in row.chunks_mut(4).enumerate() {
+                    let corners = [above[px], above[px + 1], below[px], below[px + 1]];
+                    let painted_share = coverage(px as f64, y, corners);
+                    if painted_share > 0.0 {
+                        pixel.copy_from_slice(&mix(bg, fg, painted_share).0);
+                    }
+                }
+                above = below;
+            }
+        });
 
     let mut png_bytes = Vec::new();
     PngEncoder::new(&mut png_bytes)
@@ -999,6 +1033,21 @@ fn create_image_from_binary_data(
         colour_transitions,
         shared_edges,
     })
+}
+
+/// Rows rendered together by one parallel task.
+const BAND_ROWS: usize = 16;
+
+/// Samples per side of the grid used to anti-alias pixels on an outline (so 16 per pixel).
+const AA_SAMPLES: u32 = 4;
+
+/// Linear mix of two colours, alpha included: `from` at 0, `to` at 1. Colours aren't weighted by
+/// alpha, so an edge over a transparent background keeps a light fringe the decoder still reads as
+/// background, at the cost of a faint halo over dark backdrops.
+fn mix(from: Rgba<u8>, to: Rgba<u8>, amount: f64) -> Rgba<u8> {
+    Rgba(std::array::from_fn(|i| {
+        (from[i] as f64 + (to[i] as f64 - from[i] as f64) * amount).round() as u8
+    }))
 }
 
 /// Calculate greatest common divisor for ratio normalization
@@ -2851,7 +2900,11 @@ mod tests {
                 let gray = image::load_from_memory(&generated.png_bytes)
                     .expect("load failed")
                     .to_luma8();
-                gray.pixels().filter(|p| p[0] < 128).count() as f64 / gray.len() as f64
+                // Ink weighted by darkness, so anti-aliased edge pixels count partly.
+                gray.pixels()
+                    .map(|p| 1.0 - p[0] as f64 / 255.0)
+                    .sum::<f64>()
+                    / gray.len() as f64
             };
             let (small, large) = (share(MIN_TRIANGLE_WIDTH), share(MAX_TRIANGLE_WIDTH));
             assert!(
@@ -3000,6 +3053,42 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn outlines_are_anti_aliased() {
+        for style in STYLES {
+            let generated = generate(style, (1, 1), 40);
+            let gray = image::load_from_memory(&generated.png_bytes)
+                .expect("load failed")
+                .to_luma8();
+            let pure = |x: u32, y: u32| matches!(gray.get_pixel(x, y)[0], 0 | 255);
+            let mut blended = 0;
+            for (x, y, p) in gray.enumerate_pixels() {
+                if matches!(p[0], 0 | 255) {
+                    continue;
+                }
+                blended += 1;
+                // Blended pixels sit on an outline, so they touch a fully painted or blank one.
+                let touches_pure =
+                    (x.saturating_sub(1)..=(x + 1).min(gray.width() - 1)).any(|nx| {
+                        (y.saturating_sub(1)..=(y + 1).min(gray.height() - 1))
+                            .any(|ny| pure(nx, ny))
+                    });
+                assert!(
+                    touches_pure,
+                    "{:?}: blended pixel ({x}, {y}) away from any edge",
+                    style
+                );
+            }
+            let share = blended as f64 / gray.len() as f64;
+            assert!(
+                (0.005..0.2).contains(&share),
+                "{:?}: {:.3} of pixels blended",
+                style,
+                share
+            );
         }
     }
 

@@ -1547,6 +1547,7 @@ dependencies = [
  "imageproc",
  "rand 0.8.6",
  "rand_chacha 0.3.1",
+ "rayon",
  "reed-solomon-erasure",
  "rmp-serde",
  "serde",
