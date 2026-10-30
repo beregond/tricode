@@ -2,17 +2,90 @@
 /// is considered a cluster/merge false positive and is discarded before grid reading.
 const FALSE_POSITIVE_AREA_FACTOR: f32 = 1.2;
 
-/// Bit box width in pixels.
-const PIXELS_PER_BIT_WIDTH: u32 = 51;
+/// Triangle base width in pixels used when nothing else is asked for. It is also the smallest
+/// allowed: below it the 1 px gaps of the Tiles style don't survive any resampling.
+pub const DEFAULT_TRIANGLE_WIDTH: u32 = 37;
+/// Smallest allowed triangle base width in pixels.
+pub const MIN_TRIANGLE_WIDTH: u32 = DEFAULT_TRIANGLE_WIDTH;
+/// Largest allowed triangle base width in pixels (about 4× the default).
+pub const MAX_TRIANGLE_WIDTH: u32 = 149;
+/// Largest image the generator renders, in pixels. The image is held in memory as RGBA while it is
+/// drawn, so this is about 190 MiB; long payloads hit it even at the default triangle width.
+pub const MAX_IMAGE_PIXELS: u64 = 50_000_000;
 
-/// Bit box height in pixels: the height of an equilateral triangle `PIXELS_PER_BIT_WIDTH` wide.
-fn pixels_per_bit_height() -> u32 {
-    ((PIXELS_PER_BIT_WIDTH as f64) * (3.0_f64.sqrt() / 2.0)).ceil() as u32
+/// The width the 1 px Tiles and 3 px Horizon borders were designed at; borders scale from it.
+const BORDER_REFERENCE_WIDTH: f64 = 51.0;
+
+/// Bit box height in pixels: the height of an equilateral triangle `triangle_width` wide.
+fn triangle_height(triangle_width: u32) -> u32 {
+    ((triangle_width as f64) * (3.0_f64.sqrt() / 2.0)).ceil() as u32
+}
+
+/// Checks that a triangle width is odd (so each triangle is symmetric around a pixel column and
+/// ends in a one-pixel tip) and within [`MIN_TRIANGLE_WIDTH`]..=[`MAX_TRIANGLE_WIDTH`].
+fn validate_triangle_width(triangle_width: u32) -> Result<(), String> {
+    if !(MIN_TRIANGLE_WIDTH..=MAX_TRIANGLE_WIDTH).contains(&triangle_width) {
+        return Err(format!(
+            "Triangle width must be between {} and {} px, got {}",
+            MIN_TRIANGLE_WIDTH, MAX_TRIANGLE_WIDTH, triangle_width
+        ));
+    }
+    if triangle_width.is_multiple_of(2) {
+        return Err(format!(
+            "Triangle width must be odd, got {}",
+            triangle_width
+        ));
+    }
+    Ok(())
+}
+
+/// Image size in pixels for a grid: half a cell of margin on every side, and columns overlapping by
+/// half a triangle.
+fn image_size(width_squares: u32, height_squares: u32, triangle_width: u32) -> (u32, u32) {
+    let triangle_height = triangle_height(triangle_width);
+    let width = width_squares.div_ceil(2) * triangle_width + (triangle_width / 2) * 2;
+    let height = height_squares * triangle_height + (triangle_height / 2) * 2;
+    (width, height)
+}
+
+/// Fails when the image would exceed [`MAX_IMAGE_PIXELS`], naming the largest width that fits.
+fn check_image_pixels(
+    width_squares: u32,
+    height_squares: u32,
+    triangle_width: u32,
+) -> Result<(), String> {
+    let pixels = |w| {
+        let (width, height) = image_size(width_squares, height_squares, w);
+        width as u64 * height as u64
+    };
+    let requested = pixels(triangle_width);
+    if requested <= MAX_IMAGE_PIXELS {
+        return Ok(());
+    }
+    let limit = format!(
+        "Image would be {:.1} MP, over the {} MP limit",
+        requested as f64 / 1e6,
+        MAX_IMAGE_PIXELS / 1_000_000
+    );
+    match (MIN_TRIANGLE_WIDTH..=triangle_width)
+        .rev()
+        .step_by(2)
+        .find(|&w| pixels(w) <= MAX_IMAGE_PIXELS)
+    {
+        Some(w) => Err(format!(
+            "{limit}; the largest triangle width that fits is {w} px"
+        )),
+        None => Err(format!(
+            "{limit} even at the smallest triangle width; shorten the payload"
+        )),
+    }
 }
 
 use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, GrayImage, ImageBuffer, ImageEncoder, Rgba};
 use imageproc::contrast::{ThresholdType, threshold};
+use imageproc::distance_transform::Norm;
+use imageproc::morphology::dilate;
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -352,6 +425,7 @@ pub fn generate_image(
         bg_color: 0xFFFFFFFF,
         horizon_seed: 0,
         mask: None,
+        triangle_width: DEFAULT_TRIANGLE_WIDTH,
     })
     .map(|debug| debug.png_bytes)
     .unwrap_or_default()
@@ -370,20 +444,17 @@ pub struct GenerateImageParams<'a> {
     /// Index into [`MASK_NAMES`] of the mask to XOR the data with, for comparing masks.
     /// `None` (or an out-of-range index) picks the most balanced one, as normal generation does.
     pub mask: Option<usize>,
+    /// Triangle base width in pixels: odd, within [`MIN_TRIANGLE_WIDTH`]..=[`MAX_TRIANGLE_WIDTH`].
+    /// Usually [`DEFAULT_TRIANGLE_WIDTH`]; larger values give a higher-resolution image.
+    pub triangle_width: u32,
 }
 
 /// Generates a PNG image encoding the payload text, returning full debug info.
-pub fn generate_image_debug(params: GenerateImageParams<'_>) -> Option<GenerateDebug> {
-    let payload_bytes = match pack_payload(params.payload_type, params.payload) {
-        Ok(b) => b,
-        Err(_) => return None,
-    };
-    let encoded_data = match reed_solomon_encode(payload_bytes) {
-        Ok(data) => data,
-        Err(_) => return None,
-    };
-
-    Some(create_image_from_binary_data(&encoded_data, &params))
+pub fn generate_image_debug(params: GenerateImageParams<'_>) -> Result<GenerateDebug, String> {
+    validate_triangle_width(params.triangle_width)?;
+    let payload_bytes = pack_payload(params.payload_type, params.payload)?;
+    let encoded_data = reed_solomon_encode(payload_bytes)?;
+    create_image_from_binary_data(&encoded_data, &params)
 }
 
 /// For horizon style there is notation introduced, so each triangle is divided into:
@@ -804,18 +875,19 @@ fn unmix_pixels(data: &[u8], width_squares: u32) -> impl Iterator<Item = Vec<u8>
 fn create_image_from_binary_data(
     encoded_data: &[u8],
     params: &GenerateImageParams<'_>,
-) -> GenerateDebug {
+) -> Result<GenerateDebug, String> {
     let GenerateImageParams {
         width_ratio,
         height_ratio,
         style,
         horizon_seed,
         mask,
+        triangle_width,
         ..
     } = *params;
     let fg = argb_to_rgba(params.fg_color, true);
     let bg = argb_to_rgba(params.bg_color, false);
-    let pixels_per_bit_height = pixels_per_bit_height();
+    let pixels_per_bit_height = triangle_height(triangle_width);
 
     // Calculate total bits needed, we add 8 bits for border marks
     let total_bits = (encoded_data.len() + 1) * 8;
@@ -828,6 +900,7 @@ fn create_image_from_binary_data(
     // Find optimal integer dimensions using the previously written function
     let (width_squares, height_squares) =
         find_optimal_factors(total_bits as u32, normalized_width, normalized_height);
+    check_image_pixels(width_squares, height_squares, triangle_width)?;
 
     // Every cell except the 8 orientation marks carries a bit. Zero-pad the data to fill all of
     // them *before* mixing, so the mask also covers the padding at the end of the grid instead of
@@ -855,14 +928,11 @@ fn create_image_from_binary_data(
     };
 
     // Calculate padding
-    let padding_x = PIXELS_PER_BIT_WIDTH / 2;
+    let padding_x = triangle_width / 2;
     let padding_y = pixels_per_bit_height / 2;
 
     // Actual pixel dimensions (including padding)
-    let width_without_padding = width_squares.div_ceil(2) * PIXELS_PER_BIT_WIDTH;
-    let height_without_padding = height_squares * pixels_per_bit_height;
-    let width = width_without_padding + (padding_x * 2);
-    let height = height_without_padding + (padding_y * 2);
+    let (width, height) = image_size(width_squares, height_squares, triangle_width);
 
     let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::new(width, height);
 
@@ -871,15 +941,23 @@ fn create_image_from_binary_data(
         *pixel = bg;
     }
 
-    // Pre-compute border thickness once
-    let border_thickness: f64 = match style {
+    // Pre-compute border thickness once. It scales with the triangle (never below 1 px), so a
+    // larger triangle width enlarges the whole image rather than thinning the borders.
+    let border_at_reference: f64 = match style {
         ImageStyle::Horizon => 3.0,
         ImageStyle::Tiles => 1.0,
         ImageStyle::Stain => 0.0,
     };
+    let border_thickness = if border_at_reference == 0.0 {
+        0.0
+    } else {
+        (border_at_reference * triangle_width as f64 / BORDER_REFERENCE_WIDTH)
+            .round()
+            .max(1.0)
+    };
 
     // Pre-compute triangle rendering constants once
-    let tri_constants = TriangleRenderConstants::new(PIXELS_PER_BIT_WIDTH, pixels_per_bit_height);
+    let tri_constants = TriangleRenderConstants::new(triangle_width, pixels_per_bit_height);
 
     // Fill image with encoded data bits (each bit as a triangle)
     let mut bit_index = 0;
@@ -925,7 +1003,7 @@ fn create_image_from_binary_data(
                 // Pre-compute corner tip positions once per triangle
                 let corners = TriangleCorners::new(
                     pointing_down,
-                    PIXELS_PER_BIT_WIDTH,
+                    triangle_width,
                     pixels_per_bit_height,
                     border_thickness,
                 );
@@ -982,11 +1060,11 @@ fn create_image_from_binary_data(
                         dy >= pixels_per_bit_height - border_thickness as u32
                     };
 
-                    for dx in 0..PIXELS_PER_BIT_WIDTH {
+                    for dx in 0..triangle_width {
                         let x = dx as f64;
 
                         if (x - tri_constants.center_x).abs() <= half_width {
-                            let base_x = square_x * (PIXELS_PER_BIT_WIDTH / 2);
+                            let base_x = square_x * (triangle_width / 2);
                             let px = padding_x + base_x + dx;
                             let py = padding_y + square_y * pixels_per_bit_height + dy;
 
@@ -1074,25 +1152,11 @@ fn create_image_from_binary_data(
     }
 
     let mut png_bytes = Vec::new();
-    let encoder = PngEncoder::new(&mut png_bytes);
-    if encoder
+    PngEncoder::new(&mut png_bytes)
         .write_image(img.as_raw(), width, height, ExtendedColorType::Rgba8)
-        .is_err()
-    {
-        return GenerateDebug {
-            png_bytes: Vec::new(),
-            encoded_bytes: encoded_data.len(),
-            grid_rows: height_squares,
-            grid_columns: width_squares,
-            data_bits_used,
-            padding_bits,
-            mask_index,
-            colour_transitions,
-            shared_edges,
-        };
-    }
+        .map_err(|e| format!("Failed to encode PNG: {}", e))?;
 
-    GenerateDebug {
+    Ok(GenerateDebug {
         png_bytes,
         encoded_bytes: encoded_data.len(),
         grid_rows: height_squares,
@@ -1102,7 +1166,7 @@ fn create_image_from_binary_data(
         mask_index,
         colour_transitions,
         shared_edges,
-    }
+    })
 }
 
 /// Calculate greatest common divisor for ratio normalization
@@ -1372,15 +1436,87 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
     // Convert to grayscale for processing
     let gray_img = image::DynamicImage::ImageRgba8(img.clone()).to_luma8();
 
+    // Try the strongest erosion first: it is what default-sized images need, so they decode on the
+    // first attempt. Smaller erosions are only tried when that fails.
+    let mut first_failure: Option<DecodeAttempt> = None;
+    let mut failures: Vec<String> = Vec::new();
+    for radius in EROSION_RADII {
+        match decode_with_erosion(&gray_img, radius) {
+            Ok(mut attempt) if attempt.debug.text.is_some() => {
+                if radius != EROSION_RADII[0] {
+                    attempt.debug.decode_method += &format!(" (erosion {})", radius);
+                }
+                return attempt.with_annotation(&img);
+            }
+            Ok(attempt) => {
+                let error = attempt.debug.error.clone().unwrap_or_default();
+                failures.push(format!("erosion {}:\n{}", radius, error));
+                first_failure.get_or_insert(attempt);
+            }
+            Err(e) => failures.push(format!("erosion {}: {}", radius, e)),
+        }
+    }
+
+    // Every erosion failed — report the first attempt that got as far as reading a grid.
+    let failures = failures.join("\n");
+    match first_failure {
+        Some(mut attempt) => {
+            attempt.debug.error = Some(format!("All attempts failed.\n{}", failures));
+            attempt.with_annotation(&img)
+        }
+        None => Err(failures),
+    }
+}
+
+/// Erosion radii (in pixels) tried in order. Erosion peels this many pixels off every black shape
+/// so that touching triangles (Stain style, or bridges left by blur) come apart before the blobs are
+/// traced. Two pixels suit the default triangle size, but small triangles don't survive it, so the
+/// decoder falls back to gentler erosion when a decode fails.
+const EROSION_RADII: [u8; 3] = [2, 1, 0];
+
+/// One decode attempt at a given erosion radius, before its annotated image is drawn.
+struct DecodeAttempt {
+    /// `annotated_png` is left empty; [`DecodeAttempt::with_annotation`] fills it in.
+    debug: DecodeDebug,
+    triangles: Vec<Triangle>,
+    anchors: Anchors,
+}
+
+impl DecodeAttempt {
+    /// Draws the detected triangles over `img`. Done only for the attempt that is returned.
+    fn with_annotation(self, img: &ImageBuffer<Rgba<u8>, Vec<u8>>) -> Result<DecodeDebug, String> {
+        let mut annotated_img = img.clone();
+        draw_rectangles(&mut annotated_img, &self.triangles, &self.anchors);
+
+        let mut annotated_png = Vec::new();
+        PngEncoder::new(&mut annotated_png)
+            .write_image(
+                annotated_img.as_raw(),
+                annotated_img.width(),
+                annotated_img.height(),
+                ExtendedColorType::Rgba8,
+            )
+            .map_err(|e| format!("Failed to encode annotated image: {}", e))?;
+
+        Ok(DecodeDebug {
+            annotated_png,
+            ..self.debug
+        })
+    }
+}
+
+/// Detects triangles with the given erosion radius and tries every grid strategy on them.
+/// Returns `Err` only when no anchors are found; a failed decode is `Ok` with `error` set.
+fn decode_with_erosion(gray_img: &GrayImage, erosion: u8) -> Result<DecodeAttempt, String> {
     // Find triangles in the image
-    let triangles = find_triangles(&gray_img)?;
+    let triangles = find_triangles(gray_img, erosion)?;
 
     // Find the four anchor triangles at the grid corners
     let anchors = find_anchors(&triangles).ok_or("Could not find anchor triangles")?;
 
     let triangles = discard_merged_triangles(triangles, &anchors);
 
-    eprintln!("DEBUG anchors:");
+    eprintln!("DEBUG anchors (erosion {}):", erosion);
     eprintln!(
         "  top_left:     center=({:.1}, {:.1})  bbox=({}, {})–({}, {})  pointing_{}",
         anchors.top_left.center_x,
@@ -1442,40 +1578,37 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
     let row_naive = calculate_row_count(&anchors);
     let col_naive = calculate_column_count(&anchors);
 
-    // Draw rectangles on the annotated image
-    let mut annotated_img = img.clone();
-    draw_rectangles(&mut annotated_img, &triangles, &anchors);
-
-    // Encode annotated image to PNG bytes
-    let mut annotated_png = Vec::new();
-    PngEncoder::new(&mut annotated_png)
-        .write_image(
-            annotated_img.as_raw(),
-            annotated_img.width(),
-            annotated_img.height(),
-            ExtendedColorType::Rgba8,
-        )
-        .map_err(|e| format!("Failed to encode annotated image: {}", e))?;
-
-    let ctx = GridContext {
-        triangles: &triangles,
-        anchors: &anchors,
-        row_naive,
-        col_naive,
-        fit: fit_lattice(&triangles, &anchors),
+    let debug = {
+        let ctx = GridContext {
+            triangles: &triangles,
+            anchors: &anchors,
+            row_naive,
+            col_naive,
+            fit: fit_lattice(&triangles, &anchors),
+        };
+        try_grid_strategies(gray_img, &ctx)
     };
+    Ok(DecodeAttempt {
+        debug,
+        triangles,
+        anchors,
+    })
+}
 
+/// Reads the grid for every strategy's estimates until one decodes. On failure, the result has
+/// `error` set and describes the fitted grid (or the cluster+pitch estimate without one).
+fn try_grid_strategies(gray_img: &GrayImage, ctx: &GridContext) -> DecodeDebug {
     let base = DecodeDebug {
         text: None,
         content_type: String::new(),
         error: None,
         image_width: gray_img.width(),
         image_height: gray_img.height(),
-        total_triangles: triangles.len(),
-        row_count: row_naive,
-        column_count: col_naive,
+        total_triangles: ctx.triangles.len(),
+        row_count: ctx.row_naive,
+        column_count: ctx.col_naive,
         bit_count: 0,
-        annotated_png,
+        annotated_png: Vec::new(),
         decode_method: String::new(),
     };
 
@@ -1488,14 +1621,14 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
         let mut attempted = 0usize;
         let mut last_err = String::from("no new candidates");
 
-        for estimate in (strategy.estimates)(&ctx) {
-            for (rows, cols) in with_neighbourhood(&ctx, estimate) {
+        for estimate in (strategy.estimates)(ctx) {
+            for (rows, cols) in with_neighbourhood(ctx, estimate) {
                 if !tried.insert((rows, cols)) {
                     continue;
                 }
                 attempted += 1;
                 let lattice = ctx.lattice_for(rows, cols);
-                let (bits, bit_count) = read_bits_from_grid(&gray_img, rows, cols, &lattice);
+                let (bits, bit_count) = read_bits_from_grid(gray_img, rows, cols, &lattice);
                 match try_unmix_decode(&bits, cols) {
                     Ok((kind, text)) => {
                         let method = if (rows, cols) == estimate {
@@ -1504,7 +1637,7 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
                             format!("{} ±{}", strategy.name, GRID_SEARCH_RADIUS)
                         };
                         eprintln!("DEBUG '{}' succeeded: rows={} cols={}", method, rows, cols);
-                        return Ok(DecodeDebug {
+                        return DecodeDebug {
                             text: Some(text),
                             content_type: kind,
                             row_count: rows,
@@ -1512,7 +1645,7 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
                             bit_count,
                             decode_method: method,
                             ..base
-                        });
+                        };
                     }
                     Err(e) => last_err = e,
                 }
@@ -1527,18 +1660,18 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
     // All strategies failed — report using the fitted grid, or the cluster+pitch estimate without one.
     let (rows, cols) = match &ctx.fit {
         Some(fit) => (fit.rows, fit.cols),
-        None => cluster_pitch_estimate(&ctx),
+        None => cluster_pitch_estimate(ctx),
     };
     let lattice = ctx.lattice_for(rows, cols);
-    let (_, bit_count) = read_bits_from_grid(&gray_img, rows, cols, &lattice);
-    Ok(DecodeDebug {
-        error: Some(format!("All attempts failed.\n{}", failures.join("\n"))),
+    let (_, bit_count) = read_bits_from_grid(gray_img, rows, cols, &lattice);
+    DecodeDebug {
+        error: Some(failures.join("\n")),
         row_count: rows,
         column_count: cols,
         bit_count,
         decode_method: "all failed".to_string(),
         ..base
-    })
+    }
 }
 
 /// Remove false positives: any triangle significantly larger than the biggest anchor
@@ -1668,9 +1801,11 @@ fn with_neighbourhood(ctx: &GridContext, estimate: (usize, usize)) -> Vec<(usize
 }
 
 /// Rows advance by a full bit box and columns by half of one (neighbouring triangles interlock),
-/// so this is the row pitch divided by the column pitch of a rendered grid.
+/// so this is the row pitch divided by the column pitch of a rendered grid. The decoder doesn't know
+/// the triangle width, so this uses the default one; rounding moves the ratio by under 5% between
+/// the smallest and largest widths, well inside `ROW_PITCH_TOLERANCE`.
 fn pitch_aspect() -> f32 {
-    pixels_per_bit_height() as f32 / (PIXELS_PER_BIT_WIDTH / 2) as f32
+    triangle_height(DEFAULT_TRIANGLE_WIDTH) as f32 / (DEFAULT_TRIANGLE_WIDTH / 2) as f32
 }
 
 /// Distance, in row pitches, from a triangle's centroid to the centre of its cell. A pointing-down
@@ -2024,8 +2159,16 @@ pub struct Triangle {
     pub max_y: u32,        // Bounding box - bottom edge
 }
 
-/// Find triangles in a grayscale image using connected component analysis
-fn find_triangles(img: &GrayImage) -> Result<Vec<Triangle>, String> {
+/// Find triangles in a grayscale image using connected component analysis.
+///
+/// The black shapes are eroded by `erosion` pixels before they are traced, which cuts the thin
+/// bridges between touching triangles, and each traced blob is then grown back to its original size.
+///
+/// Possible improvement: erode-then-grow rounds off the triangle tips, and small triangles lose a
+/// noticeable part of their shape. Using the eroded blobs only as seeds and assigning every black
+/// pixel of the original image to its nearest seed (a watershed-style split) would keep the exact
+/// shapes, and so more accurate centroids and orientations.
+fn find_triangles(img: &GrayImage, erosion: u8) -> Result<Vec<Triangle>, String> {
     let width = img.width();
     let height = img.height();
 
@@ -2036,12 +2179,16 @@ fn find_triangles(img: &GrayImage) -> Result<Vec<Triangle>, String> {
     // Apply binary threshold to separate black and white regions
     let binary = threshold(img, 128, ThresholdType::Binary);
 
-    // Erode the binary image to separate touching triangles
-    let eroded = erode_binary(&binary, 2);
+    // Erode the black regions to separate touching triangles. imageproc treats non-zero (white)
+    // pixels as the foreground, so growing the white background by `erosion` erodes the black.
+    let eroded = dilate(&binary, Norm::LInf, erosion);
 
     // Find connected components in the eroded image
     let mut triangles = Vec::new();
     let mut visited = vec![vec![false; width as usize]; height as usize];
+    // Which component last claimed each pixel while growing back, so the buffer is shared.
+    let mut grown_by = vec![0u32; (width * height) as usize];
+    let mut component_id = 0u32;
 
     for y in 0..height {
         for x in 0..width {
@@ -2050,7 +2197,14 @@ fn find_triangles(img: &GrayImage) -> Result<Vec<Triangle>, String> {
                 let eroded_component = flood_fill(&eroded, &mut visited, x, y);
 
                 // Dilate the component back to approximate original size
-                let dilated_component = dilate_component(&eroded_component, &binary, 2);
+                component_id += 1;
+                let dilated_component = dilate_component(
+                    eroded_component,
+                    &binary,
+                    erosion,
+                    &mut grown_by,
+                    component_id,
+                );
 
                 if let Some(triangle) = analyze_component(&dilated_component, x, y) {
                     triangles.push(triangle);
@@ -2062,82 +2216,46 @@ fn find_triangles(img: &GrayImage) -> Result<Vec<Triangle>, String> {
     Ok(triangles)
 }
 
-/// Erode black regions in a binary image by removing boundary pixels
-/// Erosion reduces black regions, helping to separate touching regions
-fn erode_binary(binary: &GrayImage, radius: u32) -> GrayImage {
+/// Grow a component back by up to `radius` steps (8-connected), only through pixels that are black
+/// in the original binary image, so it can't reach across a gap into a neighbouring triangle.
+/// `grown_by` marks the pixels already in the component with `id`; it is reused across components.
+fn dilate_component(
+    mut component: Vec<(u32, u32)>,
+    binary: &GrayImage,
+    radius: u8,
+    grown_by: &mut [u32],
+    id: u32,
+) -> Vec<(u32, u32)> {
     let width = binary.width();
     let height = binary.height();
-    let mut result = binary.clone();
+    let index = |x: u32, y: u32| (y * width + x) as usize;
 
+    for &(x, y) in &component {
+        grown_by[index(x, y)] = id;
+    }
+
+    // Breadth-first: each step expands only the pixels added by the previous one.
+    let mut frontier_start = 0;
     for _ in 0..radius {
-        let mut eroded = result.clone();
-
-        for y in 0..height {
-            for x in 0..width {
-                if result.get_pixel(x, y)[0] == 0 {
-                    // This is a black pixel; check if all neighbors are also black
-                    let mut is_eroded = false;
-
-                    for dx in -1..=1i32 {
-                        for dy in -1..=1i32 {
-                            let nx = (x as i32 + dx) as u32;
-                            let ny = (y as i32 + dy) as u32;
-
-                            if nx >= width || ny >= height || result.get_pixel(nx, ny)[0] != 0 {
-                                is_eroded = true;
-                                break;
-                            }
-                        }
-                        if is_eroded {
-                            break;
-                        }
-                    }
-
-                    if is_eroded {
-                        eroded.put_pixel(x, y, image::Luma([255])); // Make white
+        let frontier_end = component.len();
+        for i in frontier_start..frontier_end {
+            let (x, y) = component[i];
+            for ny in y.saturating_sub(1)..=(y + 1).min(height - 1) {
+                for nx in x.saturating_sub(1)..=(x + 1).min(width - 1) {
+                    let n = index(nx, ny);
+                    if grown_by[n] != id && binary.get_pixel(nx, ny)[0] == 0 {
+                        grown_by[n] = id;
+                        component.push((nx, ny));
                     }
                 }
             }
         }
-        result = eroded;
+        frontier_start = frontier_end;
     }
 
-    result
+    component
 }
 
-/// Dilate a component back to approximate its original size
-/// Only expands into pixels that are black in the original binary image
-fn dilate_component(component: &[(u32, u32)], binary: &GrayImage, radius: u32) -> Vec<(u32, u32)> {
-    let width = binary.width();
-    let height = binary.height();
-    let mut expanded: std::collections::HashSet<(u32, u32)> = component.iter().copied().collect();
-
-    for _ in 0..radius {
-        let mut new_expanded = expanded.clone();
-
-        for &(x, y) in &expanded {
-            // Check all neighbors within a 3x3 region
-            for dx in -1..=1i32 {
-                for dy in -1..=1i32 {
-                    if dx == 0 && dy == 0 {
-                        continue;
-                    }
-
-                    let nx = (x as i32 + dx) as u32;
-                    let ny = (y as i32 + dy) as u32;
-
-                    // Only expand into pixels that are black in the original
-                    if nx < width && ny < height && binary.get_pixel(nx, ny)[0] == 0 {
-                        new_expanded.insert((nx, ny));
-                    }
-                }
-            }
-        }
-        expanded = new_expanded;
-    }
-
-    expanded.into_iter().collect()
-}
 fn flood_fill(
     binary: &GrayImage,
     visited: &mut [Vec<bool>],
@@ -2694,6 +2812,15 @@ mod tests {
     }
 
     fn generate(style: ImageStyle, ratio: (u32, u32), len: usize) -> GenerateDebug {
+        generate_at(style, ratio, len, DEFAULT_TRIANGLE_WIDTH)
+    }
+
+    fn generate_at(
+        style: ImageStyle,
+        ratio: (u32, u32),
+        len: usize,
+        triangle_width: u32,
+    ) -> GenerateDebug {
         generate_image_debug(GenerateImageParams {
             payload: &payload(len),
             payload_type: "text",
@@ -2704,6 +2831,7 @@ mod tests {
             bg_color: 0xFFFFFFFF,
             horizon_seed: 42,
             mask: None,
+            triangle_width,
         })
         .expect("generation failed")
     }
@@ -2764,6 +2892,8 @@ mod tests {
     /// decoder regression.
     const FIXTURES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/decode");
     const FIXTURE_PAYLOAD_LENGTHS: [usize; 4] = [5, 40, 150, 400];
+    /// Fixtures are rendered at the original 51 px width, so they also cover a non-default size.
+    const FIXTURE_TRIANGLE_WIDTH: u32 = 51;
 
     /// Rewrites the fixtures from the current renderer. Only run after an intentional format change:
     /// `tricode-regen-fixtures` (or `cargo test -p tricode --release -- --ignored regenerate_decode_fixtures`)
@@ -2774,7 +2904,7 @@ mod tests {
         for style in STYLES {
             for ratio in RATIOS {
                 for len in FIXTURE_PAYLOAD_LENGTHS {
-                    let generated = generate(style, ratio, len);
+                    let generated = generate_at(style, ratio, len, FIXTURE_TRIANGLE_WIDTH);
                     let name = format!(
                         "{}_{}x{}_len{}_{}x{}.png",
                         format!("{:?}", style).to_lowercase(),
@@ -2868,12 +2998,130 @@ mod tests {
     }
 
     #[test]
+    fn decodes_at_the_triangle_width_limits() {
+        for triangle_width in [MIN_TRIANGLE_WIDTH, 75, MAX_TRIANGLE_WIDTH] {
+            for style in STYLES {
+                let len = 40;
+                let generated = generate_at(style, (16, 9), len, triangle_width);
+                let label = format!("{:?} {} px", style, triangle_width);
+                assert_decodes_exactly(&label, len, grid_of(&generated), &generated.png_bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn borders_scale_with_the_triangle_width() {
+        // Same grid at two widths: the larger image must be the smaller one enlarged, so the share
+        // of foreground pixels stays about the same instead of growing as fixed borders thin out.
+        for style in STYLES {
+            let share = |triangle_width| {
+                let generated = generate_at(style, (1, 1), 40, triangle_width);
+                let gray = image::load_from_memory(&generated.png_bytes)
+                    .expect("load failed")
+                    .to_luma8();
+                gray.pixels().filter(|p| p[0] < 128).count() as f64 / gray.len() as f64
+            };
+            let (small, large) = (share(MIN_TRIANGLE_WIDTH), share(MAX_TRIANGLE_WIDTH));
+            assert!(
+                (small - large).abs() < 0.03,
+                "{:?}: foreground share {:.3} at {} px vs {:.3} at {} px",
+                style,
+                small,
+                MIN_TRIANGLE_WIDTH,
+                large,
+                MAX_TRIANGLE_WIDTH
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_triangle_widths() {
+        for triangle_width in [MIN_TRIANGLE_WIDTH - 2, 38, MAX_TRIANGLE_WIDTH + 2] {
+            let result = generate_image_debug(GenerateImageParams {
+                payload: &payload(5),
+                payload_type: "text",
+                width_ratio: 1,
+                height_ratio: 1,
+                style: ImageStyle::Tiles,
+                fg_color: 0xFF000000,
+                bg_color: 0xFFFFFFFF,
+                horizon_seed: 0,
+                mask: None,
+                triangle_width,
+            });
+            assert!(result.is_err(), "{} px was accepted", triangle_width);
+        }
+    }
+
+    #[test]
+    fn pixel_limit_names_the_largest_width_that_fits() {
+        // 400 bytes at 16:9 is a 48×143 grid: about 70 MP at the largest width.
+        let grid = grid_of(&generate(ImageStyle::Tiles, (16, 9), 400));
+        let (rows, cols) = (grid.0 as u32, grid.1 as u32);
+        let error = check_image_pixels(cols, rows, MAX_TRIANGLE_WIDTH).expect_err("fits");
+        let fits: u32 = error
+            .rsplit("fits is ")
+            .next()
+            .and_then(|rest| rest.trim_end_matches(" px").parse().ok())
+            .unwrap_or_else(|| panic!("no width in {error:?}"));
+        assert!(fits % 2 == 1 && fits < MAX_TRIANGLE_WIDTH, "{error}");
+        assert!(check_image_pixels(cols, rows, fits).is_ok());
+        assert!(check_image_pixels(cols, rows, fits + 2).is_err());
+
+        // Long enough to overflow even at the smallest width.
+        let error = generate_image_debug(GenerateImageParams {
+            payload: &payload(40_000),
+            payload_type: "text",
+            width_ratio: 1,
+            height_ratio: 1,
+            style: ImageStyle::Tiles,
+            fg_color: 0xFF000000,
+            bg_color: 0xFFFFFFFF,
+            horizon_seed: 0,
+            mask: None,
+            triangle_width: MIN_TRIANGLE_WIDTH,
+        })
+        .expect_err("a 40 kB payload fits");
+        assert!(error.contains("shorten the payload"), "{error}");
+    }
+
+    #[test]
+    fn small_triangles_decode_with_gentler_erosion() {
+        // Scaled from 51 px, triangles are ~18 and ~13 px wide: the default 2 px erosion destroys
+        // or merges them, so decoding has to fall back to a smaller radius.
+        for factor in [0.35, 0.25] {
+            for style in STYLES {
+                let len = 40;
+                let generated = generate_at(style, (16, 9), len, 51);
+                let label = format!("{:?} ×{}", style, factor);
+                let decoded =
+                    decode_image(&rescale(&generated.png_bytes, factor)).expect("decode errored");
+                assert_eq!(
+                    (decoded.row_count, decoded.column_count),
+                    grid_of(&generated),
+                    "{label}: wrong grid"
+                );
+                assert_eq!(
+                    decoded.text.as_deref(),
+                    Some(payload(len).as_str()),
+                    "{label}: wrong text"
+                );
+                assert!(
+                    decoded.decode_method.starts_with("lattice-fit (erosion "),
+                    "{label}: expected a gentler-erosion lattice fit, got {}",
+                    decoded.decode_method
+                );
+            }
+        }
+    }
+
+    #[test]
     fn misfit_ranks_true_grid_first() {
         for (label, _, generated) in all_cases() {
             let gray = image::load_from_memory(&generated.png_bytes)
                 .expect("load failed")
                 .to_luma8();
-            let triangles = find_triangles(&gray).expect("no triangles");
+            let triangles = find_triangles(&gray, EROSION_RADII[0]).expect("no triangles");
             let anchors = find_anchors(&triangles).expect("no anchors");
             let triangles = discard_merged_triangles(triangles, &anchors);
             // Without a fitted lattice, so only the anchor-spanned lattices are ranked.
@@ -2906,6 +3154,7 @@ mod tests {
                 bg_color: 0xFFFFFFFF,
                 horizon_seed: 0,
                 mask: Some(index),
+                triangle_width: DEFAULT_TRIANGLE_WIDTH,
             })
             .expect("generation failed");
             assert_eq!(generated.mask_index, index, "{name}");
@@ -2932,6 +3181,7 @@ mod tests {
             bg_color: 0xFFFFFFFF,
             horizon_seed: 0,
             mask,
+            triangle_width: DEFAULT_TRIANGLE_WIDTH,
         };
         let auto = generate_image_debug(params(None)).expect("generation failed");
         for (index, name) in MASK_NAMES.iter().enumerate() {
@@ -2959,6 +3209,7 @@ mod tests {
                 bg_color: 0xFFFFFFFF,
                 horizon_seed: 0,
                 mask: Some(index),
+                triangle_width: DEFAULT_TRIANGLE_WIDTH,
             })
             .expect("generation failed");
             assert_eq!(generated.padding_bits, 22);
@@ -2966,7 +3217,7 @@ mod tests {
             let gray = image::load_from_memory(&generated.png_bytes)
                 .expect("load failed")
                 .to_luma8();
-            let triangles = find_triangles(&gray).expect("no triangles");
+            let triangles = find_triangles(&gray, EROSION_RADII[0]).expect("no triangles");
             let anchors = find_anchors(&triangles).expect("no anchors");
             let triangles = discard_merged_triangles(triangles, &anchors);
             let fit = fit_lattice(&triangles, &anchors).expect("no lattice");

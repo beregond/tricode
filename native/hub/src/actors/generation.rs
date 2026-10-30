@@ -44,12 +44,12 @@ impl Notifiable<SmallText> for GenerationActor {
             bg_color: msg.bg_color,
             horizon_seed: msg.horizon_seed,
             mask: msg.mask.map(|m| m as usize),
+            triangle_width: msg.triangle_width,
         });
-        if let Some(debug) = result
-            && !debug.png_bytes.is_empty()
-        {
-            GeneratedImage {
+        let signal = match result {
+            Ok(debug) => GeneratedImage {
                 png_bytes: debug.png_bytes,
+                error: String::new(),
                 encoded_bytes: debug.encoded_bytes as u32,
                 grid_rows: debug.grid_rows,
                 grid_columns: debug.grid_columns,
@@ -63,9 +63,22 @@ impl Notifiable<SmallText> for GenerationActor {
                     .to_string(),
                 colour_transitions: debug.colour_transitions as u32,
                 shared_edges: debug.shared_edges as u32,
-            }
-            .send_signal_to_dart();
-        }
+            },
+            Err(error) => GeneratedImage {
+                png_bytes: Vec::new(),
+                error,
+                encoded_bytes: 0,
+                grid_rows: 0,
+                grid_columns: 0,
+                data_bits_used: 0,
+                padding_bits: 0,
+                mask_index: 0,
+                mask_name: String::new(),
+                colour_transitions: 0,
+                shared_edges: 0,
+            },
+        };
+        signal.send_signal_to_dart();
     }
 }
 

@@ -28,6 +28,72 @@ const _maskNames = [
   'None',
 ];
 
+/// Triangle base width limits in pixels, matching `MIN_TRIANGLE_WIDTH`,
+/// `DEFAULT_TRIANGLE_WIDTH` and `MAX_TRIANGLE_WIDTH` in native/tricode/src/lib.rs.
+const _minTriangleWidth = 37;
+const _defaultTriangleWidth = 37;
+const _maxTriangleWidth = 149;
+
+/// Preset triangle widths offered in the size dropdown.
+const _triangleWidthPresets = [
+  (_defaultTriangleWidth, 'Standard'),
+  (75, 'High (×2)'),
+  (_maxTriangleWidth, 'Print (×4)'),
+];
+
+/// Label of the action that reveals a saved file, in each system's own words.
+String get _revealLabel {
+  if (Platform.isMacOS) return 'Show in Finder';
+  if (Platform.isWindows) return 'Show in Explorer';
+  return 'Show in folder';
+}
+
+/// Opens the system file manager with [path] selected, or at least its folder
+/// open. Returns false when nothing could be opened.
+Future<bool> _revealInFileManager(String path) async {
+  final file = File(path).absolute;
+  try {
+    if (Platform.isMacOS) {
+      final result = await Process.run('open', ['-R', file.path]);
+      if (result.exitCode == 0) return true;
+    } else if (Platform.isWindows) {
+      // Explorer exits with 1 even when it worked, so the exit code is ignored.
+      await Process.run('explorer.exe', ['/select,', file.path]);
+      return true;
+    } else if (Platform.isLinux) {
+      // Nautilus, Dolphin, Nemo, Caja and others implement this freedesktop
+      // interface, which also selects the file; xdg-open below only opens the
+      // folder.
+      final result = await Process.run('dbus-send', [
+        '--session',
+        '--print-reply',
+        '--dest=org.freedesktop.FileManager1',
+        '--type=method_call',
+        '/org/freedesktop/FileManager1',
+        'org.freedesktop.FileManager1.ShowItems',
+        // dbus-send splits array items on commas, so escape them in the URI.
+        'array:string:${file.uri.toString().replaceAll(',', '%2C')}',
+        'string:',
+      ]);
+      if (result.exitCode == 0) return true;
+    }
+  } on ProcessException {
+    // The tool isn't installed or can't be run (e.g. sandboxed); fall back.
+  }
+  return launchUrl(Uri.directory(file.parent.path));
+}
+
+/// Why [text] is not an allowed triangle width, or null when it is.
+String? _triangleWidthError(String text) {
+  final width = int.tryParse(text.trim());
+  if (width == null) return 'Enter a number';
+  if (width < _minTriangleWidth || width > _maxTriangleWidth) {
+    return 'Must be $_minTriangleWidth–$_maxTriangleWidth px';
+  }
+  if (width.isEven) return 'Must be odd';
+  return null;
+}
+
 Future<void> main() async {
   await initializeRust(assignRustSignal);
   runApp(const MyApp());
@@ -86,6 +152,15 @@ class _MyHomePageState extends State<MyHomePage>
     text: (DateTime.now().millisecondsSinceEpoch ~/ 1000).toString(),
   );
   Timer? _seedDebounce;
+  final TextEditingController _triangleWidthController = TextEditingController(
+    text: '$_defaultTriangleWidth',
+  );
+  Timer? _triangleWidthDebounce;
+  int _triangleWidth = _defaultTriangleWidth;
+  bool _customTriangleWidth = false;
+  int _requestedTriangleWidth = _defaultTriangleWidth; // of the pending image
+  int _imageTriangleWidth = _defaultTriangleWidth; // of the shown image
+  String? _generateError;
   StreamSubscription<RustSignalPack<GeneratedImage>>? _generatedImageSub;
   StreamSubscription<RustSignalPack<DecodeResult>>? _decodeResultSub;
   Uint8List? _latestImage;
@@ -152,6 +227,10 @@ class _MyHomePageState extends State<MyHomePage>
           _generateDebug = null;
           _selectedStyle = 0;
           _selectedMask = null;
+          _triangleWidth = _defaultTriangleWidth;
+          _customTriangleWidth = false;
+          _triangleWidthController.text = '$_defaultTriangleWidth';
+          _generateError = null;
           _fgColor = Colors.black;
           _bgColor = Colors.white;
         });
@@ -177,6 +256,7 @@ class _MyHomePageState extends State<MyHomePage>
           _imageWidth = null;
           _imageHeight = null;
           _generateDebug = null;
+          _generateError = null;
         });
       }
     }
@@ -188,6 +268,17 @@ class _MyHomePageState extends State<MyHomePage>
 
     _generatedImageSub = GeneratedImage.rustSignalStream.listen((signal) async {
       if (!mounted) return;
+      if (signal.message.error.isNotEmpty) {
+        setState(() {
+          _latestImage = null;
+          _imageWidth = null;
+          _imageHeight = null;
+          _isGenerating = false;
+          _generateDebug = null;
+          _generateError = signal.message.error;
+        });
+        return;
+      }
       final imageBytes = Uint8List.fromList(signal.message.pngBytes);
 
       // Decode image to get dimensions
@@ -203,6 +294,8 @@ class _MyHomePageState extends State<MyHomePage>
         _zoomLevel = 1.0; // Reset zoom when new image is generated
         _isGenerating = false; // Stop loading indicator
         _generateDebug = signal.message;
+        _generateError = null;
+        _imageTriangleWidth = _requestedTriangleWidth;
       });
     });
 
@@ -230,6 +323,8 @@ class _MyHomePageState extends State<MyHomePage>
 
     setState(() {
       _isGenerating = true; // Start loading indicator
+      _generateError = null;
+      _requestedTriangleWidth = _triangleWidth;
     });
 
     final effectiveBg = _bgColor;
@@ -246,6 +341,7 @@ class _MyHomePageState extends State<MyHomePage>
         BigInt.from(int.tryParse(_horizonSeedController.text.trim()) ?? 0),
       ),
       mask: _showDebugInfo ? _selectedMask : null,
+      triangleWidth: _triangleWidth,
     ).sendSignalToRust();
   }
 
@@ -416,11 +512,7 @@ class _MyHomePageState extends State<MyHomePage>
 
         await file.saveTo(filePath.path);
 
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Image saved to: ${filePath.path}')),
-          );
-        }
+        if (mounted) _showSavedSnackBar(filePath.path);
       }
     } catch (e) {
       if (mounted) {
@@ -429,6 +521,26 @@ class _MyHomePageState extends State<MyHomePage>
         ).showSnackBar(SnackBar(content: Text('Error saving image: $e')));
       }
     }
+  }
+
+  /// Tells the user where a file was saved, with an action that reveals it in
+  /// the system file manager.
+  void _showSavedSnackBar(String path) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Image saved to: $path'),
+        duration: const Duration(seconds: 8),
+        action: SnackBarAction(
+          label: _revealLabel,
+          onPressed: () async {
+            if (await _revealInFileManager(path) || !mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Could not open the file manager')),
+            );
+          },
+        ),
+      ),
+    );
   }
 
   Future<void> _copyImageToClipboard() async {
@@ -521,11 +633,7 @@ class _MyHomePageState extends State<MyHomePage>
 
         await file.saveTo(filePath.path);
 
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Image saved to: ${filePath.path}')),
-          );
-        }
+        if (mounted) _showSavedSnackBar(filePath.path);
       }
     } catch (e) {
       if (mounted) {
@@ -920,6 +1028,99 @@ class _MyHomePageState extends State<MyHomePage>
                     },
                   ),
                   const SizedBox(height: 16),
+                  // Half the width, centred: the size rarely changes, so it
+                  // shouldn't take a full row like the main inputs.
+                  FractionallySizedBox(
+                    widthFactor: 0.5,
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: InputDecorator(
+                            decoration: const InputDecoration(
+                              labelText: 'Triangle size',
+                              border: OutlineInputBorder(),
+                              contentPadding: EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 4,
+                              ),
+                            ),
+                            child: DropdownButtonHideUnderline(
+                              // null = custom width typed into the field beside it
+                              child: DropdownButton<int?>(
+                                value: _customTriangleWidth
+                                    ? null
+                                    : _triangleWidth,
+                                isExpanded: true,
+                                items: [
+                                  for (final (width, name)
+                                      in _triangleWidthPresets)
+                                    DropdownMenuItem(
+                                      value: width,
+                                      child: Text('$name — $width px'),
+                                    ),
+                                  const DropdownMenuItem(
+                                    value: null,
+                                    child: Text('Custom…'),
+                                  ),
+                                ],
+                                onChanged: (width) {
+                                  setState(() {
+                                    _customTriangleWidth = width == null;
+                                    if (width != null) {
+                                      _triangleWidth = width;
+                                    }
+                                    _triangleWidthController.text =
+                                        '$_triangleWidth';
+                                  });
+                                  if (width != null &&
+                                      _textController.text.trim().isNotEmpty) {
+                                    _sendTextToRust();
+                                  }
+                                },
+                              ),
+                            ),
+                          ),
+                        ),
+                        if (_customTriangleWidth) ...[
+                          const SizedBox(width: 8),
+                          SizedBox(
+                            width: 120,
+                            child: TextField(
+                              controller: _triangleWidthController,
+                              keyboardType: TextInputType.number,
+                              decoration: InputDecoration(
+                                labelText: 'Width (px)',
+                                helperText:
+                                    'Odd, $_minTriangleWidth–$_maxTriangleWidth',
+                                errorText: _triangleWidthError(
+                                  _triangleWidthController.text,
+                                ),
+                                border: const OutlineInputBorder(),
+                              ),
+                              onChanged: (text) {
+                                setState(() {});
+                                if (_triangleWidthError(text) != null) return;
+                                _triangleWidth = int.parse(text.trim());
+                                _triangleWidthDebounce?.cancel();
+                                _triangleWidthDebounce = Timer(
+                                  const Duration(milliseconds: 500),
+                                  () {
+                                    if (_textController.text
+                                        .trim()
+                                        .isNotEmpty) {
+                                      _sendTextToRust();
+                                    }
+                                  },
+                                );
+                              },
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
                   if (_showDebugInfo) ...[
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 16.0),
@@ -1060,6 +1261,18 @@ class _MyHomePageState extends State<MyHomePage>
                     const SizedBox(height: 8),
                     const Text('Generating image...'),
                     const SizedBox(height: 20),
+                  ] else if (_generateError != null) ...[
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                      child: Text(
+                        _generateError!,
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
                   ] else if (_latestImage != null) ...[
                     const Divider(height: 40, thickness: 1),
                     Row(
@@ -1134,6 +1347,17 @@ class _MyHomePageState extends State<MyHomePage>
                         ),
                       ),
                     ),
+                    if (_imageWidth != null && _imageHeight != null) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        '$_imageWidth × $_imageHeight px'
+                        ' · triangles $_imageTriangleWidth px wide',
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey,
+                        ),
+                      ),
+                    ],
                     // Zoom controls - only show if image is bigger than container
                     if (_shouldShowZoomControls) ...[
                       const SizedBox(height: 8),
@@ -1221,6 +1445,8 @@ class _MyHomePageState extends State<MyHomePage>
     _heightRatioController.dispose();
     _horizonSeedController.dispose();
     _seedDebounce?.cancel();
+    _triangleWidthController.dispose();
+    _triangleWidthDebounce?.cancel();
     super.dispose();
   }
 }

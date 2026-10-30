@@ -20,6 +20,9 @@ pub struct SmallText {
     /// Debug: index into `tricode::MASK_NAMES` of the mask to XOR the data with;
     /// `None` picks the most balanced mask, as normal generation does
     pub mask: Option<u32>,
+    /// Triangle base width in pixels: odd, between `tricode::MIN_TRIANGLE_WIDTH` and
+    /// `tricode::MAX_TRIANGLE_WIDTH`; `tricode::DEFAULT_TRIANGLE_WIDTH` normally
+    pub triangle_width: u32,
 }
 
 /// Image bytes to be decoded.
@@ -48,10 +51,11 @@ pub struct DecodeResult {
     pub decode_method: String,    // "naive", "cluster+pitch", "brute-force ±1", or "all failed"
 }
 
-/// PNG image bytes generated from an input payload.
+/// PNG image bytes generated from an input payload, or why generation failed.
 #[derive(Serialize, RustSignal)]
 pub struct GeneratedImage {
-    pub png_bytes: Vec<u8>,
+    pub png_bytes: Vec<u8>, // empty on failure
+    pub error: String,      // empty on success; the other fields are zero on failure
     // debug info
     pub encoded_bytes: u32, // bytes after Reed-Solomon encoding
     pub grid_rows: u32,
