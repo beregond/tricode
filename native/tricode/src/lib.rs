@@ -132,38 +132,7 @@ impl HorizonLayout {
         effective_seed.hash(&mut hasher);
 
         // --- Step 1: reconstruct which cells are foreground (bit == 1) ---
-        // This mirrors the bit-extraction logic in create_image_from_binary_data.
-        let mut is_fg = vec![vec![false; cols as usize]; rows as usize];
-        let mut bit_index: usize = 0;
-        let last_row = rows as usize - 1;
-        let last_col = cols as usize - 1;
-        for (row, row_cells) in is_fg.iter_mut().enumerate() {
-            for (col, cell) in row_cells.iter_mut().enumerate() {
-                let is_first_row = row == 0;
-                let is_last_row = row == last_row;
-                let is_first_col = col == 0;
-                let is_second_col = col == 1;
-                let is_before_last_col = col == last_col - 1;
-                let is_last_col = col == last_col;
-
-                let bit = if (is_first_row || is_last_row) && (is_first_col || is_last_col) {
-                    1u8
-                } else if (is_first_row || is_last_row) && (is_second_col || is_before_last_col) {
-                    0u8
-                } else {
-                    let byte_index = bit_index / 8;
-                    let bit_val = if byte_index < encoded_data.len() {
-                        let bit_offset = 7 - (bit_index % 8);
-                        (encoded_data[byte_index] >> bit_offset) & 1
-                    } else {
-                        0
-                    };
-                    bit_index += 1;
-                    bit_val
-                };
-                *cell = bit == 1;
-            }
-        }
+        let is_fg = layout_cells(encoded_data, rows, cols);
 
         // --- Step 2: select which foreground cells are "candidates" ---
         // Use the low 2 bits of the hash: candidate unless both bits are set,
@@ -349,6 +318,9 @@ pub struct GenerateDebug {
     pub grid_columns: u32,
     pub data_bits_used: usize, // bits actually written from encoded_data
     pub padding_bits: usize,   // zero-fill bits to complete the grid
+    pub mask_index: usize,     // index into MASKS of the mask the data was XORed with
+    pub colour_transitions: usize, // shared triangle edges between cells of different colour
+    pub shared_edges: usize,   // all triangle edges shared by two cells
 }
 
 /// Convert a Flutter/Android-style ARGB `u32` (`0xAARRGGBB`) to an `Rgba<u8>`.
@@ -370,25 +342,19 @@ pub fn generate_image(
     width_ratio: u32,
     height_ratio: u32,
 ) -> Vec<u8> {
-    let payload_bytes = match pack_payload(payload_type, payload) {
-        Ok(b) => b,
-        Err(_) => return Vec::new(),
-    };
-    let encoded_data = match reed_solomon_encode(payload_bytes) {
-        Ok(data) => data,
-        Err(_) => return Vec::new(),
-    };
-
-    create_image_from_binary_data(
-        &encoded_data,
+    generate_image_debug(GenerateImageParams {
+        payload,
+        payload_type,
         width_ratio,
         height_ratio,
-        ImageStyle::Tiles,
-        argb_to_rgba(0xFF000000, true),
-        argb_to_rgba(0xFFFFFFFF, false),
-        0,
-    )
-    .png_bytes
+        style: ImageStyle::Tiles,
+        fg_color: 0xFF000000,
+        bg_color: 0xFFFFFFFF,
+        horizon_seed: 0,
+        mask: None,
+    })
+    .map(|debug| debug.png_bytes)
+    .unwrap_or_default()
 }
 
 /// Parameters for [`generate_image_debug`].
@@ -401,6 +367,9 @@ pub struct GenerateImageParams<'a> {
     pub fg_color: u32,
     pub bg_color: u32,
     pub horizon_seed: u64,
+    /// Index into [`MASK_NAMES`] of the mask to XOR the data with, for comparing masks.
+    /// `None` (or an out-of-range index) picks the most balanced one, as normal generation does.
+    pub mask: Option<usize>,
 }
 
 /// Generates a PNG image encoding the payload text, returning full debug info.
@@ -414,15 +383,7 @@ pub fn generate_image_debug(params: GenerateImageParams<'_>) -> Option<GenerateD
         Err(_) => return None,
     };
 
-    Some(create_image_from_binary_data(
-        &encoded_data,
-        params.width_ratio,
-        params.height_ratio,
-        params.style,
-        argb_to_rgba(params.fg_color, true),
-        argb_to_rgba(params.bg_color, false),
-        params.horizon_seed,
-    ))
+    Some(create_image_from_binary_data(&encoded_data, &params))
 }
 
 /// For horizon style there is notation introduced, so each triangle is divided into:
@@ -683,6 +644,17 @@ fn apply_mask(data: &[u8], mask: &[&[u8]], width_squares: u32) -> Vec<u8> {
     result
 }
 
+/// Human-readable names of [`MASKS`], in the same order.
+pub const MASK_NAMES: [&str; 7] = [
+    "Checkerboard",
+    "2×2 blocks",
+    "Right wave",
+    "Left wave",
+    "Vertical lines",
+    "Horizontal lines",
+    "None",
+];
+
 /// Predefined bitmasks, tiled over the grid. Shared by encoding and decoding.
 #[rustfmt::skip]
 static MASKS: &[&[&[u8]]] = &[
@@ -737,22 +709,87 @@ static MASKS: &[&[&[u8]]] = &[
     ],
 ];
 
-/// XORs `encoded_data` with each predefined mask (tiled to cover the grid), then
-/// returns the result whose ratio of 1-bits to 0-bits is closest to 1
-/// (i.e. the most balanced bit distribution).
-fn mix_pixels(encoded_data: &[u8], width_squares: u32, _height_squares: u32) -> Vec<u8> {
+/// Orientation of the triangle in cell `(row, col)`, as the renderer draws it.
+fn points_down(row: usize, col: usize) -> bool {
+    (row + col).is_multiple_of(2)
+}
+
+/// Foreground (bit = 1) flag of every grid cell, laid out as the renderer draws them: orientation
+/// marks in the corners of the first and last rows, then the data bits MSB first, then zero
+/// padding.
+fn layout_cells(data: &[u8], rows: u32, cols: u32) -> Vec<Vec<bool>> {
+    let (rows, cols) = (rows as usize, cols as usize);
+    let mut bits = (0..data.len() * 8).map(|i| (data[i / 8] >> (7 - i % 8)) & 1 == 1);
+    (0..rows)
+        .map(|row| {
+            (0..cols)
+                .map(|col| {
+                    let is_edge_row = row == 0 || row + 1 == rows;
+                    if is_edge_row && (col == 0 || col + 1 == cols) {
+                        true
+                    } else if is_edge_row && (col == 1 || col + 2 == cols) {
+                        false
+                    } else {
+                        bits.next().unwrap_or(false)
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Counts the triangle edges shared by two cells, returning `(differing, total)`: how many of them
+/// separate cells of different colour, out of all of them. Every cell shares an edge with its
+/// right-hand neighbour, and a pointing-down cell also shares its top edge with the cell above it.
+fn colour_transitions(cells: &[Vec<bool>]) -> (usize, usize) {
+    let (mut differing, mut total) = (0, 0);
+    for (row, row_cells) in cells.iter().enumerate() {
+        for (col, &cell) in row_cells.iter().enumerate() {
+            let neighbours = [
+                row_cells.get(col + 1).copied(),
+                (row > 0 && points_down(row, col)).then(|| cells[row - 1][col]),
+            ];
+            for neighbour in neighbours.into_iter().flatten() {
+                total += 1;
+                if neighbour != cell {
+                    differing += 1;
+                }
+            }
+        }
+    }
+    (differing, total)
+}
+
+/// XORs `encoded_data` with a predefined mask (tiled to cover the grid) and returns the result
+/// together with the index of the mask used. `forced` selects a mask by index; otherwise (or
+/// when it's out of range) the mask giving the most colour changes between neighbouring triangles
+/// is picked (see [`colour_transitions`]), which breaks the image into fine texture instead of
+/// large solid patches. Ties go to the mask with the most even split of 1-bits and 0-bits.
+fn mix_pixels(
+    encoded_data: &[u8],
+    width_squares: u32,
+    height_squares: u32,
+    forced: Option<usize>,
+) -> (Vec<u8>, usize) {
+    if let Some(index) = forced.filter(|&i| i < MASKS.len()) {
+        return (apply_mask(encoded_data, MASKS[index], width_squares), index);
+    }
+
     let total_bits = encoded_data.len() * 8;
 
     MASKS
         .iter()
         .map(|mask| apply_mask(encoded_data, mask, width_squares))
-        .min_by_key(|mixed| {
+        .enumerate()
+        .min_by_key(|(_, mixed)| {
+            let (transitions, _) =
+                colour_transitions(&layout_cells(mixed, height_squares, width_squares));
             let ones = mixed.iter().map(|b| b.count_ones() as i64).sum::<i64>();
             let zeros = total_bits as i64 - ones;
-            // Minimise |ones - zeros| → ratio ones/zeros closest to 1
-            (ones - zeros).abs()
+            (std::cmp::Reverse(transitions), (ones - zeros).abs())
         })
-        .unwrap_or_else(|| encoded_data.to_vec())
+        .map(|(index, mixed)| (mixed, index))
+        .unwrap_or_else(|| (encoded_data.to_vec(), MASKS.len() - 1))
 }
 
 /// Reverse of [`mix_pixels`]: yields `data` unmixed with every predefined mask.
@@ -766,13 +803,18 @@ fn unmix_pixels(data: &[u8], width_squares: u32) -> impl Iterator<Item = Vec<u8>
 
 fn create_image_from_binary_data(
     encoded_data: &[u8],
-    width_ratio: u32,
-    height_ratio: u32,
-    style: ImageStyle,
-    fg: Rgba<u8>,
-    bg: Rgba<u8>,
-    horizon_seed: u64,
+    params: &GenerateImageParams<'_>,
 ) -> GenerateDebug {
+    let GenerateImageParams {
+        width_ratio,
+        height_ratio,
+        style,
+        horizon_seed,
+        mask,
+        ..
+    } = *params;
+    let fg = argb_to_rgba(params.fg_color, true);
+    let bg = argb_to_rgba(params.bg_color, false);
     let pixels_per_bit_height = pixels_per_bit_height();
 
     // Calculate total bits needed, we add 8 bits for border marks
@@ -787,7 +829,18 @@ fn create_image_from_binary_data(
     let (width_squares, height_squares) =
         find_optimal_factors(total_bits as u32, normalized_width, normalized_height);
 
-    let data = mix_pixels(encoded_data, width_squares, height_squares);
+    // Every cell except the 8 orientation marks carries a bit. Zero-pad the data to fill all of
+    // them *before* mixing, so the mask also covers the padding at the end of the grid instead of
+    // leaving it blank. The decoder unmixes the whole grid and drops bits past the encoded length.
+    let data_capacity = ((width_squares * height_squares) as usize).saturating_sub(8);
+    let data_bits_used = (encoded_data.len() * 8).min(data_capacity);
+    let padding_bits = data_capacity - data_bits_used;
+    let mut padded = encoded_data.to_vec();
+    padded.resize(padded.len().max(data_capacity.div_ceil(8)), 0);
+
+    let (data, mask_index) = mix_pixels(&padded, width_squares, height_squares, mask);
+    let (colour_transitions, shared_edges) =
+        colour_transitions(&layout_cells(&data, height_squares, width_squares));
 
     // Now that we know the grid size, build the Horizon layout if needed.
     let horizon_layout: Option<HorizonLayout> = if style == ImageStyle::Horizon {
@@ -1031,23 +1084,24 @@ fn create_image_from_binary_data(
             encoded_bytes: encoded_data.len(),
             grid_rows: height_squares,
             grid_columns: width_squares,
-            data_bits_used: bit_index,
-            padding_bits: 0,
+            data_bits_used,
+            padding_bits,
+            mask_index,
+            colour_transitions,
+            shared_edges,
         };
     }
-
-    let grid_cells = (width_squares * height_squares) as usize;
-    let orientation_cells = 8;
-    let data_capacity = grid_cells.saturating_sub(orientation_cells);
-    let padding_bits = data_capacity.saturating_sub(bit_index);
 
     GenerateDebug {
         png_bytes,
         encoded_bytes: encoded_data.len(),
         grid_rows: height_squares,
         grid_columns: width_squares,
-        data_bits_used: bit_index,
+        data_bits_used,
         padding_bits,
+        mask_index,
+        colour_transitions,
+        shared_edges,
     }
 }
 
@@ -1670,7 +1724,7 @@ impl Lattice {
         // A pointing-up bottom-left anchor sits an extra 2·CENTROID_OFFSET pitches lower.
         let span = anchors.bottom_left.center_y - top_left.center_y;
         let last_row = (rows - 1) as f32;
-        let row_pitch = if Self::points_down(rows - 1, 0) {
+        let row_pitch = if points_down(rows - 1, 0) {
             span / last_row
         } else {
             span / (last_row + 2.0 * CENTROID_OFFSET)
@@ -1686,13 +1740,8 @@ impl Lattice {
         }
     }
 
-    /// Orientation of cell `(row, col)`, matching the renderer.
-    fn points_down(row: usize, col: usize) -> bool {
-        (row + col).is_multiple_of(2)
-    }
-
     fn centroid(&self, row: usize, col: usize) -> (f32, f32) {
-        let g = orientation_group(Self::points_down(row, col));
+        let g = orientation_group(points_down(row, col));
         (
             self.x0[g] + col as f32 * self.col_pitch,
             self.y0[g] + row as f32 * self.row_pitch,
@@ -1714,7 +1763,7 @@ impl Lattice {
             let (col, row) = (col_f.round(), row_f.round());
             total += (col_f - col).powi(2) + (row_f - row).powi(2);
             let inside = row >= 0.0 && col >= 0.0 && (row as usize) < rows && (col as usize) < cols;
-            if !inside || Self::points_down(row as usize, col as usize) == t.pointing_up {
+            if !inside || points_down(row as usize, col as usize) == t.pointing_up {
                 total += 1.0;
             }
         }
@@ -2654,6 +2703,7 @@ mod tests {
             fg_color: 0xFF000000,
             bg_color: 0xFFFFFFFF,
             horizon_seed: 42,
+            mask: None,
         })
         .expect("generation failed")
     }
@@ -2838,6 +2888,99 @@ mod tests {
             let off_estimate = (truth.0 + 3, truth.1 - 4);
             let ranked = with_neighbourhood(&ctx, off_estimate);
             assert_eq!(ranked.first(), Some(&truth), "{label}");
+        }
+    }
+
+    #[test]
+    fn every_forced_mask_is_used_and_decodes() {
+        assert_eq!(MASK_NAMES.len(), MASKS.len());
+        let len = 40;
+        for (index, name) in MASK_NAMES.iter().enumerate() {
+            let generated = generate_image_debug(GenerateImageParams {
+                payload: &payload(len),
+                payload_type: "text",
+                width_ratio: 16,
+                height_ratio: 9,
+                style: ImageStyle::Tiles,
+                fg_color: 0xFF000000,
+                bg_color: 0xFFFFFFFF,
+                horizon_seed: 0,
+                mask: Some(index),
+            })
+            .expect("generation failed");
+            assert_eq!(generated.mask_index, index, "{name}");
+            assert_decodes_exactly(name, len, grid_of(&generated), &generated.png_bytes);
+        }
+    }
+
+    #[test]
+    fn colour_transitions_counts_shared_triangle_edges() {
+        // Row 1 has one pointing-down cell, (1, 1), whose top edge it shares with (0, 1).
+        let cells = vec![vec![true, false, true], vec![true, true, false]];
+        assert_eq!(colour_transitions(&cells), (4, 5));
+    }
+
+    #[test]
+    fn auto_mask_has_the_most_colour_transitions() {
+        let params = |mask| GenerateImageParams {
+            payload: "Lorem ipsum dolor sit amet, consectetur adipiscing elit.",
+            payload_type: "text",
+            width_ratio: 21,
+            height_ratio: 13,
+            style: ImageStyle::Tiles,
+            fg_color: 0xFF000000,
+            bg_color: 0xFFFFFFFF,
+            horizon_seed: 0,
+            mask,
+        };
+        let auto = generate_image_debug(params(None)).expect("generation failed");
+        for (index, name) in MASK_NAMES.iter().enumerate() {
+            let forced = generate_image_debug(params(Some(index))).expect("generation failed");
+            assert_eq!(forced.shared_edges, auto.shared_edges);
+            assert!(
+                auto.colour_transitions >= forced.colour_transitions,
+                "{} beats the automatic choice",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn masks_cover_the_padding_at_the_end_of_the_grid() {
+        for (index, name) in MASK_NAMES.iter().enumerate() {
+            // 14×41 grid: the data ends partway through the last row, leaving 22 padding cells.
+            let generated = generate_image_debug(GenerateImageParams {
+                payload: &payload(5),
+                payload_type: "text",
+                width_ratio: 16,
+                height_ratio: 9,
+                style: ImageStyle::Tiles,
+                fg_color: 0xFF000000,
+                bg_color: 0xFFFFFFFF,
+                horizon_seed: 0,
+                mask: Some(index),
+            })
+            .expect("generation failed");
+            assert_eq!(generated.padding_bits, 22);
+
+            let gray = image::load_from_memory(&generated.png_bytes)
+                .expect("load failed")
+                .to_luma8();
+            let triangles = find_triangles(&gray).expect("no triangles");
+            let anchors = find_anchors(&triangles).expect("no anchors");
+            let triangles = discard_merged_triangles(triangles, &anchors);
+            let fit = fit_lattice(&triangles, &anchors).expect("no lattice");
+            let (bytes, bit_count) = read_bits_from_grid(&gray, fit.rows, fit.cols, &fit.lattice);
+            // The padding is zeros, so after XOR every padding cell must show the mask itself.
+            let mask = MASKS[index];
+            let cols = generated.grid_columns as usize;
+            let read: Vec<u8> = (generated.data_bits_used..bit_count)
+                .map(|k| (bytes[k / 8] >> (7 - k % 8)) & 1)
+                .collect();
+            let expected: Vec<u8> = (generated.data_bits_used..bit_count)
+                .map(|k| mask[(k / cols) % mask.len()][(k % cols) % mask[0].len()])
+                .collect();
+            assert_eq!(read, expected, "{name}: padding doesn't carry the mask");
         }
     }
 

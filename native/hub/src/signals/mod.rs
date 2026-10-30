@@ -17,6 +17,9 @@ pub struct SmallText {
     pub bg_color: u32,
     /// Seed controlling the Horizon style layout; 0 means "use current unix time"
     pub horizon_seed: u64,
+    /// Debug: index into `tricode::MASK_NAMES` of the mask to XOR the data with;
+    /// `None` picks the most balanced mask, as normal generation does
+    pub mask: Option<u32>,
 }
 
 /// Image bytes to be decoded.
@@ -55,4 +58,8 @@ pub struct GeneratedImage {
     pub grid_columns: u32,
     pub data_bits_used: u32, // bits written from encoded data
     pub padding_bits: u32,   // zero-fill bits to complete the grid
+    pub mask_index: u32,     // index into `tricode::MASK_NAMES` of the mask that was used
+    pub mask_name: String,
+    pub colour_transitions: u32, // shared triangle edges between cells of different colour
+    pub shared_edges: u32,       // all triangle edges shared by two cells
 }

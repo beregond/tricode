@@ -43,6 +43,7 @@ impl Notifiable<SmallText> for GenerationActor {
             fg_color: msg.fg_color,
             bg_color: msg.bg_color,
             horizon_seed: msg.horizon_seed,
+            mask: msg.mask.map(|m| m as usize),
         });
         if let Some(debug) = result
             && !debug.png_bytes.is_empty()
@@ -54,6 +55,14 @@ impl Notifiable<SmallText> for GenerationActor {
                 grid_columns: debug.grid_columns,
                 data_bits_used: debug.data_bits_used as u32,
                 padding_bits: debug.padding_bits as u32,
+                mask_index: debug.mask_index as u32,
+                mask_name: tricode::MASK_NAMES
+                    .get(debug.mask_index)
+                    .copied()
+                    .unwrap_or_default()
+                    .to_string(),
+                colour_transitions: debug.colour_transitions as u32,
+                shared_edges: debug.shared_edges as u32,
             }
             .send_signal_to_dart();
         }

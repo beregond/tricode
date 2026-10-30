@@ -16,6 +16,18 @@ import 'package:super_clipboard/super_clipboard.dart';
 
 import 'src/bindings/bindings.dart';
 
+/// Data masks the generator can XOR the payload with, in the same order as
+/// `MASK_NAMES` / `MASKS` in native/tricode/src/lib.rs (the index is sent to Rust).
+const _maskNames = [
+  'Checkerboard',
+  '2×2 blocks',
+  'Right wave',
+  'Left wave',
+  'Vertical lines',
+  'Horizontal lines',
+  'None',
+];
+
 Future<void> main() async {
   await initializeRust(assignRustSignal);
   runApp(const MyApp());
@@ -90,6 +102,7 @@ class _MyHomePageState extends State<MyHomePage>
   GeneratedImage? _generateDebug;
   bool _showDebugInfo = false;
   String _selectedPayloadType = 'text';
+  int? _selectedMask; // null = most balanced (automatic), debug only
   Color _fgColor = Colors.black;
   Color _bgColor = Colors.white;
 
@@ -138,6 +151,7 @@ class _MyHomePageState extends State<MyHomePage>
           _isGenerating = false;
           _generateDebug = null;
           _selectedStyle = 0;
+          _selectedMask = null;
           _fgColor = Colors.black;
           _bgColor = Colors.white;
         });
@@ -231,6 +245,7 @@ class _MyHomePageState extends State<MyHomePage>
       horizonSeed: Uint64(
         BigInt.from(int.tryParse(_horizonSeedController.text.trim()) ?? 0),
       ),
+      mask: _showDebugInfo ? _selectedMask : null,
     ).sendSignalToRust();
   }
 
@@ -587,6 +602,9 @@ class _MyHomePageState extends State<MyHomePage>
                               if (!enabled && _selectedPayloadType == 'plain') {
                                 _selectedPayloadType = 'text';
                               }
+                              if (!enabled) {
+                                _selectedMask = null;
+                              }
                             });
                           },
                         ),
@@ -902,6 +920,47 @@ class _MyHomePageState extends State<MyHomePage>
                     },
                   ),
                   const SizedBox(height: 16),
+                  if (_showDebugInfo) ...[
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                      child: InputDecorator(
+                        decoration: const InputDecoration(
+                          labelText: 'Mask (debug)',
+                          border: OutlineInputBorder(),
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 4,
+                          ),
+                        ),
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<int?>(
+                            value: _selectedMask,
+                            isExpanded: true,
+                            items: [
+                              const DropdownMenuItem(
+                                value: null,
+                                child: Text('Auto (most balanced)'),
+                              ),
+                              for (final (index, name) in _maskNames.indexed)
+                                DropdownMenuItem(
+                                  value: index,
+                                  child: Text(name),
+                                ),
+                            ],
+                            onChanged: (mask) {
+                              setState(() {
+                                _selectedMask = mask;
+                              });
+                              if (_textController.text.trim().isNotEmpty) {
+                                _sendTextToRust();
+                              }
+                            },
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                  ],
                   if (_selectedStyle == 2) ...[
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 16.0),
@@ -1359,6 +1418,12 @@ class _GenerateDebugTable extends StatelessWidget {
       ('Encoded bytes', '${result.encodedBytes}'),
       ('Data bits used', '${result.dataBitsUsed}'),
       ('Padding bits', '${result.paddingBits}'),
+      ('Mask', '${result.maskName} (#${result.maskIndex})'),
+      (
+        'Colour changes',
+        '${result.colourTransitions} / ${result.sharedEdges} edges'
+            ' (${result.sharedEdges == 0 ? 0 : (100 * result.colourTransitions / result.sharedEdges).toStringAsFixed(1)}%)',
+      ),
     ];
     return Table(
       columnWidths: const {0: IntrinsicColumnWidth(), 1: FlexColumnWidth()},
