@@ -114,20 +114,9 @@ pub fn pack_payload(kind: &str, text: &str) -> Result<Vec<u8>, String> {
 ///    `("plain", string)`.
 /// 4. Only if all three steps fail do we return `Err`.
 pub fn unpack_payload(bytes: &[u8]) -> Result<(String, String), String> {
-    #[derive(Deserialize)]
-    struct Envelope {
-        #[serde(rename = "type")]
-        kind: String,
-        value: String,
-    }
-
     // Step 1 — try to match the expected named-map envelope.
-    // `to_vec_named` writes a msgpack map with string keys; we must deserialise
-    // in the same named/map mode — rmp_serde's default `from_slice` uses the
-    // compact array format which is incompatible with named maps.
-    let mut de = rmp_serde::Deserializer::new(bytes);
-    if let Ok(envelope) = Envelope::deserialize(&mut de) {
-        return Ok((envelope.kind, envelope.value));
+    if let Some(envelope) = unpack_envelope(bytes) {
+        return Ok(envelope);
     }
 
     // Step 2 — valid msgpack but wrong shape: decode to a generic JSON value and
@@ -147,6 +136,24 @@ pub fn unpack_payload(bytes: &[u8]) -> Result<(String, String), String> {
         "payload is not a recognised msgpack envelope, valid msgpack, or UTF-8 text ({} bytes)",
         bytes.len()
     ))
+}
+
+/// Step 1 of [`unpack_payload`]: the `{"type": ..., "value": ...}` envelope written by
+/// [`pack_payload`], as `(kind, value)`.
+fn unpack_envelope(bytes: &[u8]) -> Option<(String, String)> {
+    #[derive(Deserialize)]
+    struct Envelope {
+        #[serde(rename = "type")]
+        kind: String,
+        value: String,
+    }
+
+    // `to_vec_named` writes a msgpack map with string keys; we must deserialise
+    // in the same named/map mode — rmp_serde's default `from_slice` uses the
+    // compact array format which is incompatible with named maps.
+    let mut de = rmp_serde::Deserializer::new(bytes);
+    let envelope = Envelope::deserialize(&mut de).ok()?;
+    Some((envelope.kind, envelope.value))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1163,9 +1170,8 @@ pub fn reed_solomon_encode(data: Vec<u8>) -> Result<Vec<u8>, String> {
         return Err("Input data is empty".to_string());
     }
 
-    // Number of data shards and parity shards
-    let data_shard_count = 10;
-    let parity_shard_count = 10;
+    let data_shard_count = RS_DATA_SHARDS;
+    let parity_shard_count = RS_PARITY_SHARDS;
 
     // Create Reed-Solomon encoder
     let rs = ReedSolomon::new(data_shard_count, parity_shard_count)
@@ -1217,6 +1223,48 @@ pub fn reed_solomon_encode(data: Vec<u8>) -> Result<Vec<u8>, String> {
 /// Can recover from up to parity_shard_count corrupted or missing shards.
 /// Returns the original data.
 pub fn reed_solomon_decode(encoded_data: Vec<u8>) -> Result<Vec<u8>, String> {
+    let (original_len, shards) = read_shards(&encoded_data)?;
+
+    // Create Reed-Solomon decoder
+    let rs = ReedSolomon::new(RS_DATA_SHARDS, RS_PARITY_SHARDS)
+        .map_err(|e| format!("Failed to create Reed-Solomon decoder: {:?}", e))?;
+
+    let mut shards: Vec<Option<Vec<u8>>> = shards.into_iter().map(Some).collect();
+
+    // Verify and reconstruct if needed
+    rs.reconstruct(&mut shards)
+        .map_err(|e| format!("Failed to reconstruct: {:?}", e))?;
+
+    // Extract original data from data shards
+    let mut result = Vec::new();
+    for shard in shards.iter().take(RS_DATA_SHARDS).flatten() {
+        result.extend_from_slice(shard);
+    }
+
+    // Trim to original length
+    result.truncate(original_len);
+
+    Ok(result)
+}
+
+/// Shard counts used by [`reed_solomon_encode`] and [`reed_solomon_decode`].
+const RS_DATA_SHARDS: usize = 10;
+const RS_PARITY_SHARDS: usize = 10;
+
+/// Whether the parity shards of `encoded_data` match its data shards. [`reed_solomon_decode`]
+/// doesn't check this (with no shard missing, `reconstruct` has nothing to do), so it is how a
+/// correct reading is told apart from a wrong one whatever the payload format.
+fn reed_solomon_verifies(encoded_data: &[u8]) -> bool {
+    let Ok((_, shards)) = read_shards(encoded_data) else {
+        return false;
+    };
+    ReedSolomon::new(RS_DATA_SHARDS, RS_PARITY_SHARDS)
+        .and_then(|rs| rs.verify(&shards))
+        .unwrap_or(false)
+}
+
+/// Splits Reed-Solomon encoded data into the original data length and its shards.
+fn read_shards(encoded_data: &[u8]) -> Result<(usize, Vec<Vec<u8>>), String> {
     if encoded_data.len() < 8 {
         return Err("Encoded data is too short".to_string());
     }
@@ -1236,51 +1284,27 @@ pub fn reed_solomon_decode(encoded_data: Vec<u8>) -> Result<Vec<u8>, String> {
         encoded_data[7],
     ]) as usize;
 
-    let data_shard_count = 10;
-    let parity_shard_count = 10;
-    let total_shards = data_shard_count + parity_shard_count;
+    let total_shards = RS_DATA_SHARDS + RS_PARITY_SHARDS;
 
     // Trim to expected length (caller may pass more data than needed)
-    let expected_len = 8 + (total_shards * shard_size);
-    let encoded_data = if encoded_data.len() > expected_len {
-        encoded_data[..expected_len].to_vec()
-    } else if encoded_data.len() != expected_len {
+    let expected_len = total_shards
+        .checked_mul(shard_size)
+        .and_then(|len| len.checked_add(8))
+        .ok_or("Invalid shard size")?;
+    if encoded_data.len() < expected_len {
         return Err(format!(
             "Invalid encoded data length: expected {}, got {}",
             expected_len,
             encoded_data.len()
         ));
-    } else {
-        encoded_data
-    };
-
-    // Create Reed-Solomon decoder
-    let rs = ReedSolomon::new(data_shard_count, parity_shard_count)
-        .map_err(|e| format!("Failed to create Reed-Solomon decoder: {:?}", e))?;
+    }
 
     // Extract shards
-    let mut shards = Vec::new();
-    let mut offset = 8;
-    for _ in 0..total_shards {
-        let shard = encoded_data[offset..offset + shard_size].to_vec();
-        shards.push(Some(shard));
-        offset += shard_size;
-    }
-
-    // Verify and reconstruct if needed
-    rs.reconstruct(&mut shards)
-        .map_err(|e| format!("Failed to reconstruct: {:?}", e))?;
-
-    // Extract original data from data shards
-    let mut result = Vec::new();
-    for shard in shards.iter().take(data_shard_count).flatten() {
-        result.extend_from_slice(shard);
-    }
-
-    // Trim to original length
-    result.truncate(original_len);
-
-    Ok(result)
+    let shards = encoded_data[8..expected_len]
+        .chunks(shard_size.max(1))
+        .map(<[u8]>::to_vec)
+        .collect();
+    Ok((original_len, shards))
 }
 
 /// Decodes a PNG image back to the original text payload.
@@ -1509,26 +1533,37 @@ fn try_grid_strategies(gray_img: &GrayImage, ctx: &GridContext) -> DecodeDebug {
                 }
                 attempted += 1;
                 let lattice = ctx.lattice_for(rows, cols);
-                let (bits, bit_count) = read_bits_from_grid(gray_img, rows, cols, &lattice);
-                match try_unmix_decode(&bits, cols) {
-                    Ok((kind, text)) => {
-                        let method = if (rows, cols) == estimate {
-                            strategy.name.to_string()
-                        } else {
-                            format!("{} ±{}", strategy.name, GRID_SEARCH_RADIUS)
-                        };
-                        eprintln!("DEBUG '{}' succeeded: rows={} cols={}", method, rows, cols);
-                        return DecodeDebug {
-                            text: Some(text),
-                            content_type: kind,
-                            row_count: rows,
-                            column_count: cols,
-                            bit_count,
-                            decode_method: method,
-                            ..base
-                        };
+                let cells = sample_cells(gray_img, rows, cols, &lattice);
+                let readings = FLIPS.map(|flip| (flip, pack_data_bits(&cells, flip)));
+                // Every reading is first required to verify (see `try_unmix_decode`), since the
+                // lenient fallbacks of `unpack_payload` also accept a mirrored reading of a code.
+                for (strict, (flip, (bits, bit_count))) in [true, false]
+                    .into_iter()
+                    .flat_map(|strict| readings.iter().map(move |reading| (strict, reading)))
+                {
+                    match try_unmix_decode(bits, cols, strict) {
+                        Ok((kind, text)) => {
+                            let mut method = if (rows, cols) == estimate {
+                                strategy.name.to_string()
+                            } else {
+                                format!("{} ±{}", strategy.name, GRID_SEARCH_RADIUS)
+                            };
+                            if let Some(name) = flip.name() {
+                                method += &format!(" ({})", name);
+                            }
+                            eprintln!("DEBUG '{}' succeeded: rows={} cols={}", method, rows, cols);
+                            return DecodeDebug {
+                                text: Some(text),
+                                content_type: kind,
+                                row_count: rows,
+                                column_count: cols,
+                                bit_count: *bit_count,
+                                decode_method: method,
+                                ..base
+                            };
+                        }
+                        Err(e) => last_err = e,
                     }
-                    Err(e) => last_err = e,
                 }
             }
         }
@@ -1544,7 +1579,7 @@ fn try_grid_strategies(gray_img: &GrayImage, ctx: &GridContext) -> DecodeDebug {
         None => cluster_pitch_estimate(ctx),
     };
     let lattice = ctx.lattice_for(rows, cols);
-    let (_, bit_count) = read_bits_from_grid(gray_img, rows, cols, &lattice);
+    let (_, bit_count) = pack_data_bits(&sample_cells(gray_img, rows, cols, &lattice), FLIPS[0]);
     DecodeDebug {
         error: Some(failures.join("\n")),
         row_count: rows,
@@ -2548,11 +2583,26 @@ fn sample_region_is_dark(img: &GrayImage, cx: f32, cy: f32, radius: u32) -> bool
 }
 
 /// Tries every unmixed variant of `bits` until Reed-Solomon decoding and
-/// payload unpacking succeed.
-fn try_unmix_decode(bits: &[u8], width_squares: usize) -> Result<(String, String), String> {
+/// payload unpacking succeed. `strict` accepts only readings whose Reed-Solomon parity matches
+/// or that hold a payload envelope (so a few misread cells don't rule out an enveloped code);
+/// without it, anything [`unpack_payload`] can make sense of is accepted.
+fn try_unmix_decode(
+    bits: &[u8],
+    width_squares: usize,
+    strict: bool,
+) -> Result<(String, String), String> {
+    let decode = |candidate: Vec<u8>| {
+        let verified = strict && reed_solomon_verifies(&candidate);
+        let data = reed_solomon_decode(candidate)?;
+        if !strict || verified {
+            return unpack_payload(&data);
+        }
+        unpack_envelope(&data)
+            .ok_or_else(|| "parity doesn't match and payload is not an envelope".to_string())
+    };
     let mut last_err = "no masks to try".to_string();
     for candidate in unmix_pixels(bits, width_squares as u32) {
-        match reed_solomon_decode(candidate).and_then(|d| unpack_payload(&d)) {
+        match decode(candidate) {
             Ok(result) => return Ok(result),
             Err(e) => last_err = e,
         }
@@ -2560,18 +2610,58 @@ fn try_unmix_decode(bits: &[u8], width_squares: usize) -> Result<(String, String
     Err(last_err)
 }
 
-/// Read bits from the image by sampling the pixel color at the centroid of each
-/// grid cell's triangle.  The orientation-mark cells (first/last row, first 2 and last 2
-/// columns) are skipped — they are not data bits.  Returns the data bits packed
-/// into bytes (MSB first).
-fn read_bits_from_grid(
+/// A mirror image of the code: which axes the image was flipped along.
+#[derive(Debug, Clone, Copy)]
+struct Flip {
+    horizontal: bool,
+    vertical: bool,
+}
+
+impl Flip {
+    /// Appended to `decode_method` when the code was read through this flip.
+    fn name(self) -> Option<&'static str> {
+        match (self.horizontal, self.vertical) {
+            (false, false) => None,
+            (true, false) => Some("flipped horizontally"),
+            (false, true) => Some("flipped vertically"),
+            (true, true) => Some("flipped both ways"),
+        }
+    }
+}
+
+/// Bit orders tried when reading a grid, unflipped first. Grids always have an even row count and
+/// an odd column count, so a mirrored code is still a valid lattice with the top-left cell pointing
+/// down, and the orientation marks are symmetric: only the order of the data bits changes, and
+/// Reed-Solomon decoding tells which order is right.
+const FLIPS: [Flip; 4] = [
+    Flip {
+        horizontal: false,
+        vertical: false,
+    },
+    Flip {
+        horizontal: true,
+        vertical: false,
+    },
+    Flip {
+        horizontal: false,
+        vertical: true,
+    },
+    Flip {
+        horizontal: true,
+        vertical: true,
+    },
+];
+
+/// Samples whether each grid cell is dark, at the centroid of its triangle. Indexed `[row][col]`
+/// as the cells appear in the image.
+fn sample_cells(
     img: &GrayImage,
     row_count: usize,
     column_count: usize,
     lattice: &Lattice,
-) -> (Vec<u8>, usize) {
+) -> Vec<Vec<bool>> {
     if row_count < 2 || column_count < 2 {
-        return (Vec::new(), 0);
+        return Vec::new();
     }
 
     // Sampling radius: ~15% of the column step to stay well inside the triangle body
@@ -2582,6 +2672,24 @@ fn read_bits_from_grid(
         lattice.x0[0], lattice.y0[0], lattice.col_pitch, lattice.row_pitch, sample_radius
     );
 
+    (0..row_count)
+        .map(|row| {
+            (0..column_count)
+                .map(|col| {
+                    let (cx, cy) = lattice.centroid(row, col);
+                    sample_region_is_dark(img, cx, cy, sample_radius)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Reads the data bits out of sampled `cells` in the order the renderer wrote them, undoing
+/// `flip`. The orientation-mark cells (first/last row, first 2 and last 2 columns) are skipped —
+/// they are not data bits. Returns the data bits packed into bytes (MSB first) and their count.
+fn pack_data_bits(cells: &[Vec<bool>], flip: Flip) -> (Vec<u8>, usize) {
+    let row_count = cells.len();
+    let column_count = cells.first().map_or(0, Vec::len);
     let mut bits: Vec<bool> = Vec::new();
 
     for row in 0..row_count {
@@ -2596,9 +2704,17 @@ fn read_bits_from_grid(
                 continue;
             }
 
-            let (cx, cy) = lattice.centroid(row, col);
-
-            bits.push(sample_region_is_dark(img, cx, cy, sample_radius));
+            let image_row = if flip.vertical {
+                row_count - 1 - row
+            } else {
+                row
+            };
+            let image_col = if flip.horizontal {
+                column_count - 1 - col
+            } else {
+                col
+            };
+            bits.push(cells[image_row][image_col]);
         }
     }
 
@@ -2858,6 +2974,126 @@ mod tests {
             let (len, truth) = parse_fixture_name(&name).expect("bad fixture name");
             let png = std::fs::read(format!("{FIXTURES_DIR}/{name}")).expect("read fixture");
             assert_decodes_exactly(&name, len, truth, &png);
+        }
+    }
+
+    /// Mirrors a PNG horizontally and/or vertically, as a selfie camera or a code seen through
+    /// glass would.
+    fn flip(png: &[u8], horizontally: bool, vertically: bool) -> Vec<u8> {
+        let mut img = image::load_from_memory(png)
+            .expect("load failed")
+            .to_luma8();
+        if horizontally {
+            img = image::imageops::flip_horizontal(&img);
+        }
+        if vertically {
+            img = image::imageops::flip_vertical(&img);
+        }
+        let mut out = Vec::new();
+        PngEncoder::new(&mut out)
+            .write_image(
+                img.as_raw(),
+                img.width(),
+                img.height(),
+                ExtendedColorType::L8,
+            )
+            .expect("encode failed");
+        out
+    }
+
+    /// Decodes every fixture flipped horizontally, vertically and both ways.
+    fn assert_fixtures_decode_flipped(horizontally: bool, vertically: bool, suffix: &str) {
+        for entry in std::fs::read_dir(FIXTURES_DIR).expect("fixtures dir missing") {
+            let name = entry.expect("read fixtures dir").file_name();
+            let name = name.to_string_lossy();
+            let Some((len, truth)) = parse_fixture_name(&name) else {
+                continue;
+            };
+            let png = std::fs::read(format!("{FIXTURES_DIR}/{name}")).expect("read fixture");
+            let decoded =
+                decode_image(&flip(&png, horizontally, vertically)).expect("decode errored");
+            let label = format!("{name} {suffix}");
+            assert_eq!(
+                (decoded.row_count, decoded.column_count),
+                truth,
+                "{label}: wrong grid"
+            );
+            assert_eq!(
+                decoded.text.as_deref(),
+                Some(payload(len).as_str()),
+                "{label}: wrong text"
+            );
+            assert_eq!(
+                decoded.decode_method,
+                format!("lattice-fit ({suffix})"),
+                "{label}: wrong method"
+            );
+        }
+    }
+
+    #[test]
+    fn decodes_horizontally_flipped_fixtures() {
+        assert_fixtures_decode_flipped(true, false, "flipped horizontally");
+    }
+
+    #[test]
+    fn decodes_vertically_flipped_fixtures() {
+        assert_fixtures_decode_flipped(false, true, "flipped vertically");
+    }
+
+    #[test]
+    fn decodes_fixtures_flipped_both_ways() {
+        assert_fixtures_decode_flipped(true, true, "flipped both ways");
+    }
+
+    /// Codes without a payload envelope must decode the same in every orientation, so telling
+    /// the right reading apart can't rely on the envelope. Compared with the unflipped decode
+    /// rather than the payload, because how bare bytes are unpacked is up to `unpack_payload`.
+    #[test]
+    fn decodes_flipped_codes_without_an_envelope() {
+        for style in STYLES {
+            for ratio in RATIOS {
+                // Read unflipped, a horizontally flipped 1×1 code of length 218 unpacks as the
+                // msgpack integer 11, so it fails when only the envelope is checked.
+                for len in [5, 40, 150, 218] {
+                    let encoded = reed_solomon_encode(payload(len).into_bytes()).expect("encode");
+                    let generated = create_image_from_binary_data(
+                        &encoded,
+                        &GenerateImageParams {
+                            payload: "",
+                            payload_type: "",
+                            width_ratio: ratio.0,
+                            height_ratio: ratio.1,
+                            style,
+                            fg_color: 0xFF000000,
+                            bg_color: 0xFFFFFFFF,
+                            horizon_seed: 42,
+                            mask: None,
+                            triangle_width: DEFAULT_TRIANGLE_WIDTH,
+                        },
+                    )
+                    .expect("generation failed");
+                    let unflipped = decode_image(&generated.png_bytes).expect("decode errored");
+                    let label = format!("{:?} {:?} len={}", style, ratio, len);
+                    assert_eq!(unflipped.decode_method, "lattice-fit", "{label}: unflipped");
+                    for (horizontally, vertically) in [(true, false), (false, true), (true, true)] {
+                        let png = flip(&generated.png_bytes, horizontally, vertically);
+                        let decoded = decode_image(&png).expect("decode errored");
+                        let label = format!("{label} flipped h={} v={}", horizontally, vertically);
+                        assert_eq!(
+                            (&decoded.content_type, &decoded.text),
+                            (&unflipped.content_type, &unflipped.text),
+                            "{label}: decodes differently ({})",
+                            decoded.decode_method
+                        );
+                        assert!(
+                            decoded.decode_method.starts_with("lattice-fit (flipped "),
+                            "{label}: flip not detected ({})",
+                            decoded.decode_method
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -3228,7 +3464,8 @@ mod tests {
             let anchors = find_anchors(&triangles).expect("no anchors");
             let triangles = discard_merged_triangles(triangles, &anchors);
             let fit = fit_lattice(&triangles, &anchors).expect("no lattice");
-            let (bytes, bit_count) = read_bits_from_grid(&gray, fit.rows, fit.cols, &fit.lattice);
+            let cells = sample_cells(&gray, fit.rows, fit.cols, &fit.lattice);
+            let (bytes, bit_count) = pack_data_bits(&cells, FLIPS[0]);
             // The padding is zeros, so after XOR every padding cell must show the mask itself.
             let mask = MASKS[index];
             let cols = generated.grid_columns as usize;
