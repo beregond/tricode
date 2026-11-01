@@ -23,6 +23,9 @@ pub struct SmallText {
     /// Triangle base width in pixels: odd, between `tricode::MIN_TRIANGLE_WIDTH` and
     /// `tricode::MAX_TRIANGLE_WIDTH`; `tricode::DEFAULT_TRIANGLE_WIDTH` normally
     pub triangle_width: u32,
+    /// Error correction: 0 = Low (~7% of the code can be damaged), 1 = Medium (~15%),
+    /// 2 = Quartile (~25%), 3 = High (~30%). Higher levels make the grid larger.
+    pub ecc_level: u32,
 }
 
 /// Image bytes to be decoded.
@@ -48,7 +51,10 @@ pub struct DecodeResult {
     pub column_count: u32,
     pub bit_count: u32,
     pub annotated_image: Vec<u8>, // PNG bytes of annotated image, empty on early failure
-    pub decode_method: String,    // "naive", "cluster+pitch", "brute-force ±1", or "all failed"
+    pub decode_method: String, // e.g. "lattice-fit", "naive ±5 (flipped horizontally)", or "all failed"
+    pub ecc_level: String,     // "Low", "Medium", "Quartile" or "High"; empty on failure
+    pub corrected_bytes: u32,  // bytes the error correction repaired
+    pub erased_bytes: u32,     // bytes read from cells the decoder was unsure about
 }
 
 /// PNG image bytes generated from an input payload, or why generation failed.

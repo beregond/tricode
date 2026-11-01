@@ -45,6 +45,7 @@ impl Notifiable<SmallText> for GenerationActor {
             horizon_seed: msg.horizon_seed,
             mask: msg.mask.map(|m| m as usize),
             triangle_width: msg.triangle_width,
+            ecc_level: tricode::EccLevel::from_u32(msg.ecc_level),
         });
         let signal = match result {
             Ok(debug) => GeneratedImage {

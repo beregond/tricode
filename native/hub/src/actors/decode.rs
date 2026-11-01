@@ -41,6 +41,12 @@ impl Notifiable<ImageBytes> for DecodeActor {
                 bit_count: debug.bit_count as u32,
                 annotated_image: debug.annotated_png,
                 decode_method: debug.decode_method,
+                ecc_level: debug
+                    .ecc_level
+                    .map(|level| level.name().to_string())
+                    .unwrap_or_default(),
+                corrected_bytes: debug.corrected_bytes as u32,
+                erased_bytes: debug.erased_bytes as u32,
             },
             Err(e) => {
                 debug_print!("Error decoding image: {}", e);
@@ -57,6 +63,9 @@ impl Notifiable<ImageBytes> for DecodeActor {
                     bit_count: 0,
                     annotated_image: Vec::new(),
                     decode_method: String::new(),
+                    ecc_level: String::new(),
+                    corrected_bytes: 0,
+                    erased_bytes: 0,
                 }
             }
         };

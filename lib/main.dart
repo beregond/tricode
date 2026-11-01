@@ -35,6 +35,15 @@ const _defaultTriangleWidth = 37;
 const _maxTriangleWidth = 149;
 
 /// Preset triangle widths offered in the size dropdown.
+/// Error-correction levels, indexed as `SmallText.eccLevel` expects, with how
+/// much of the code each survives being damaged.
+const _eccLevelNames = [
+  'Low (~7% damage)',
+  'Medium (~15% damage)',
+  'Quartile (~25% damage)',
+  'High (~30% damage)',
+];
+
 const _triangleWidthPresets = [
   (_defaultTriangleWidth, 'Standard'),
   (75, 'High (×2)'),
@@ -170,6 +179,8 @@ class _MyHomePageState extends State<MyHomePage>
   bool _isGenerating = false;
   bool _isDecoding = false;
   int _selectedStyle = 0; // 0 = Tiles, 1 = Stain
+  int _eccLevel = 1; // index into _eccLevelNames; 1 = Medium
+  bool _showAdvanced = false; // Write tab options beyond the text
   bool? _decodeSuccess;
   String? _decodeText;
   String _decodeContentType = '';
@@ -342,6 +353,7 @@ class _MyHomePageState extends State<MyHomePage>
       ),
       mask: _showDebugInfo ? _selectedMask : null,
       triangleWidth: _triangleWidth,
+      eccLevel: _eccLevel,
     ).sendSignalToRust();
   }
 
@@ -943,46 +955,6 @@ class _MyHomePageState extends State<MyHomePage>
                       ),
                     ),
                   ),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            controller: _widthRatioController,
-                            keyboardType: TextInputType.number,
-                            decoration: const InputDecoration(
-                              labelText: 'Width Ratio',
-                              border: OutlineInputBorder(),
-                              hintText: '21',
-                            ),
-                          ),
-                        ),
-                        const Padding(
-                          padding: EdgeInsets.symmetric(horizontal: 8.0),
-                          child: Text(
-                            ':',
-                            style: TextStyle(
-                              fontSize: 24,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ),
-                        Expanded(
-                          child: TextField(
-                            controller: _heightRatioController,
-                            keyboardType: TextInputType.number,
-                            decoration: const InputDecoration(
-                              labelText: 'Height Ratio',
-                              border: OutlineInputBorder(),
-                              hintText: '13',
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 16),
                   SegmentedButton<String>(
                     segments: [
                       const ButtonSegment(value: 'text', label: Text('Text')),
@@ -1028,193 +1000,6 @@ class _MyHomePageState extends State<MyHomePage>
                     },
                   ),
                   const SizedBox(height: 16),
-                  // Half the width, centred: the size rarely changes, so it
-                  // shouldn't take a full row like the main inputs.
-                  FractionallySizedBox(
-                    widthFactor: 0.5,
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(
-                          child: InputDecorator(
-                            decoration: const InputDecoration(
-                              labelText: 'Triangle size',
-                              border: OutlineInputBorder(),
-                              contentPadding: EdgeInsets.symmetric(
-                                horizontal: 12,
-                                vertical: 4,
-                              ),
-                            ),
-                            child: DropdownButtonHideUnderline(
-                              // null = custom width typed into the field beside it
-                              child: DropdownButton<int?>(
-                                value: _customTriangleWidth
-                                    ? null
-                                    : _triangleWidth,
-                                isExpanded: true,
-                                items: [
-                                  for (final (width, name)
-                                      in _triangleWidthPresets)
-                                    DropdownMenuItem(
-                                      value: width,
-                                      child: Text('$name — $width px'),
-                                    ),
-                                  const DropdownMenuItem(
-                                    value: null,
-                                    child: Text('Custom…'),
-                                  ),
-                                ],
-                                onChanged: (width) {
-                                  setState(() {
-                                    _customTriangleWidth = width == null;
-                                    if (width != null) {
-                                      _triangleWidth = width;
-                                    }
-                                    _triangleWidthController.text =
-                                        '$_triangleWidth';
-                                  });
-                                  if (width != null &&
-                                      _textController.text.trim().isNotEmpty) {
-                                    _sendTextToRust();
-                                  }
-                                },
-                              ),
-                            ),
-                          ),
-                        ),
-                        if (_customTriangleWidth) ...[
-                          const SizedBox(width: 8),
-                          SizedBox(
-                            width: 120,
-                            child: TextField(
-                              controller: _triangleWidthController,
-                              keyboardType: TextInputType.number,
-                              decoration: InputDecoration(
-                                labelText: 'Width (px)',
-                                helperText:
-                                    'Odd, $_minTriangleWidth–$_maxTriangleWidth',
-                                errorText: _triangleWidthError(
-                                  _triangleWidthController.text,
-                                ),
-                                border: const OutlineInputBorder(),
-                              ),
-                              onChanged: (text) {
-                                setState(() {});
-                                if (_triangleWidthError(text) != null) return;
-                                _triangleWidth = int.parse(text.trim());
-                                _triangleWidthDebounce?.cancel();
-                                _triangleWidthDebounce = Timer(
-                                  const Duration(milliseconds: 500),
-                                  () {
-                                    if (_textController.text
-                                        .trim()
-                                        .isNotEmpty) {
-                                      _sendTextToRust();
-                                    }
-                                  },
-                                );
-                              },
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  if (_showDebugInfo) ...[
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                      child: InputDecorator(
-                        decoration: const InputDecoration(
-                          labelText: 'Mask (debug)',
-                          border: OutlineInputBorder(),
-                          contentPadding: EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 4,
-                          ),
-                        ),
-                        child: DropdownButtonHideUnderline(
-                          child: DropdownButton<int?>(
-                            value: _selectedMask,
-                            isExpanded: true,
-                            items: [
-                              const DropdownMenuItem(
-                                value: null,
-                                child: Text('Auto (most balanced)'),
-                              ),
-                              for (final (index, name) in _maskNames.indexed)
-                                DropdownMenuItem(
-                                  value: index,
-                                  child: Text(name),
-                                ),
-                            ],
-                            onChanged: (mask) {
-                              setState(() {
-                                _selectedMask = mask;
-                              });
-                              if (_textController.text.trim().isNotEmpty) {
-                                _sendTextToRust();
-                              }
-                            },
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                  ],
-                  if (_selectedStyle == 2) ...[
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: TextField(
-                              controller: _horizonSeedController,
-                              keyboardType: TextInputType.number,
-                              decoration: const InputDecoration(
-                                labelText: 'Horizon seed',
-                                hintText: 'Leave empty for current time',
-                                border: OutlineInputBorder(),
-                              ),
-                              onChanged: (_) {
-                                _seedDebounce?.cancel();
-                                _seedDebounce = Timer(
-                                  const Duration(milliseconds: 500),
-                                  () {
-                                    if (_textController.text
-                                        .trim()
-                                        .isNotEmpty) {
-                                      _sendTextToRust();
-                                    }
-                                  },
-                                );
-                              },
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          IconButton(
-                            tooltip: 'Randomize seed',
-                            icon: const Icon(Icons.shuffle),
-                            onPressed: () {
-                              final rng = Random();
-                              // nextInt max is 2^32, so build 10 digits from two calls.
-                              // High part: 1–9, low part: 0–999999999 (9 digits zero-padded).
-                              final high = 1 + rng.nextInt(9);
-                              final low = rng.nextInt(1000000000);
-                              final seed = high * 1000000000 + low;
-                              setState(() {
-                                _horizonSeedController.text = seed.toString();
-                              });
-                              if (_textController.text.trim().isNotEmpty) {
-                                _sendTextToRust();
-                              }
-                            },
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                  ],
                   // Color pickers
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
@@ -1245,6 +1030,288 @@ class _MyHomePageState extends State<MyHomePage>
                     ],
                   ),
                   const SizedBox(height: 16),
+                  // Size, error correction and the rest are tucked away, so
+                  // the tab stays simple unless the user wants to tweak them.
+                  TextButton.icon(
+                    onPressed: () =>
+                        setState(() => _showAdvanced = !_showAdvanced),
+                    icon: Icon(
+                      _showAdvanced ? Icons.expand_less : Icons.expand_more,
+                    ),
+                    label: const Text('Advanced options'),
+                  ),
+                  const SizedBox(height: 8),
+                  if (_showAdvanced) ...[
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: _widthRatioController,
+                              keyboardType: TextInputType.number,
+                              decoration: const InputDecoration(
+                                labelText: 'Width Ratio',
+                                border: OutlineInputBorder(),
+                                hintText: '21',
+                              ),
+                            ),
+                          ),
+                          const Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 8.0),
+                            child: Text(
+                              ':',
+                              style: TextStyle(
+                                fontSize: 24,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                          Expanded(
+                            child: TextField(
+                              controller: _heightRatioController,
+                              keyboardType: TextInputType.number,
+                              decoration: const InputDecoration(
+                                labelText: 'Height Ratio',
+                                border: OutlineInputBorder(),
+                                hintText: '13',
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    // How much of the code may be damaged (scratched, covered by
+                    // a logo) and still decode. Higher levels enlarge the grid.
+                    // Half the width, like the triangle size below.
+                    FractionallySizedBox(
+                      widthFactor: 0.5,
+                      child: InputDecorator(
+                        decoration: const InputDecoration(
+                          labelText: 'Error correction',
+                          border: OutlineInputBorder(),
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 4,
+                          ),
+                        ),
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<int>(
+                            value: _eccLevel,
+                            isExpanded: true,
+                            items: [
+                              for (final (index, name)
+                                  in _eccLevelNames.indexed)
+                                DropdownMenuItem(
+                                  value: index,
+                                  child: Text(name),
+                                ),
+                            ],
+                            onChanged: (level) {
+                              if (level == null) return;
+                              setState(() {
+                                _eccLevel = level;
+                              });
+                              if (_textController.text.trim().isNotEmpty) {
+                                _sendTextToRust();
+                              }
+                            },
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    // Half the width, centred: the size rarely changes, so it
+                    // shouldn't take a full row like the main inputs.
+                    FractionallySizedBox(
+                      widthFactor: 0.5,
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            child: InputDecorator(
+                              decoration: const InputDecoration(
+                                labelText: 'Triangle size',
+                                border: OutlineInputBorder(),
+                                contentPadding: EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 4,
+                                ),
+                              ),
+                              child: DropdownButtonHideUnderline(
+                                // null = custom width typed into the field beside it
+                                child: DropdownButton<int?>(
+                                  value: _customTriangleWidth
+                                      ? null
+                                      : _triangleWidth,
+                                  isExpanded: true,
+                                  items: [
+                                    for (final (width, name)
+                                        in _triangleWidthPresets)
+                                      DropdownMenuItem(
+                                        value: width,
+                                        child: Text('$name — $width px'),
+                                      ),
+                                    const DropdownMenuItem(
+                                      value: null,
+                                      child: Text('Custom…'),
+                                    ),
+                                  ],
+                                  onChanged: (width) {
+                                    setState(() {
+                                      _customTriangleWidth = width == null;
+                                      if (width != null) {
+                                        _triangleWidth = width;
+                                      }
+                                      _triangleWidthController.text =
+                                          '$_triangleWidth';
+                                    });
+                                    if (width != null &&
+                                        _textController.text
+                                            .trim()
+                                            .isNotEmpty) {
+                                      _sendTextToRust();
+                                    }
+                                  },
+                                ),
+                              ),
+                            ),
+                          ),
+                          if (_customTriangleWidth) ...[
+                            const SizedBox(width: 8),
+                            SizedBox(
+                              width: 120,
+                              child: TextField(
+                                controller: _triangleWidthController,
+                                keyboardType: TextInputType.number,
+                                decoration: InputDecoration(
+                                  labelText: 'Width (px)',
+                                  helperText:
+                                      'Odd, $_minTriangleWidth–$_maxTriangleWidth',
+                                  errorText: _triangleWidthError(
+                                    _triangleWidthController.text,
+                                  ),
+                                  border: const OutlineInputBorder(),
+                                ),
+                                onChanged: (text) {
+                                  setState(() {});
+                                  if (_triangleWidthError(text) != null) return;
+                                  _triangleWidth = int.parse(text.trim());
+                                  _triangleWidthDebounce?.cancel();
+                                  _triangleWidthDebounce = Timer(
+                                    const Duration(milliseconds: 500),
+                                    () {
+                                      if (_textController.text
+                                          .trim()
+                                          .isNotEmpty) {
+                                        _sendTextToRust();
+                                      }
+                                    },
+                                  );
+                                },
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    if (_showDebugInfo) ...[
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                        child: InputDecorator(
+                          decoration: const InputDecoration(
+                            labelText: 'Mask (debug)',
+                            border: OutlineInputBorder(),
+                            contentPadding: EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 4,
+                            ),
+                          ),
+                          child: DropdownButtonHideUnderline(
+                            child: DropdownButton<int?>(
+                              value: _selectedMask,
+                              isExpanded: true,
+                              items: [
+                                const DropdownMenuItem(
+                                  value: null,
+                                  child: Text('Auto (most balanced)'),
+                                ),
+                                for (final (index, name) in _maskNames.indexed)
+                                  DropdownMenuItem(
+                                    value: index,
+                                    child: Text(name),
+                                  ),
+                              ],
+                              onChanged: (mask) {
+                                setState(() {
+                                  _selectedMask = mask;
+                                });
+                                if (_textController.text.trim().isNotEmpty) {
+                                  _sendTextToRust();
+                                }
+                              },
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                    ],
+                    if (_selectedStyle == 2) ...[
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: TextField(
+                                controller: _horizonSeedController,
+                                keyboardType: TextInputType.number,
+                                decoration: const InputDecoration(
+                                  labelText: 'Horizon seed',
+                                  hintText: 'Leave empty for current time',
+                                  border: OutlineInputBorder(),
+                                ),
+                                onChanged: (_) {
+                                  _seedDebounce?.cancel();
+                                  _seedDebounce = Timer(
+                                    const Duration(milliseconds: 500),
+                                    () {
+                                      if (_textController.text
+                                          .trim()
+                                          .isNotEmpty) {
+                                        _sendTextToRust();
+                                      }
+                                    },
+                                  );
+                                },
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            IconButton(
+                              tooltip: 'Randomize seed',
+                              icon: const Icon(Icons.shuffle),
+                              onPressed: () {
+                                final rng = Random();
+                                // nextInt max is 2^32, so build 10 digits from two calls.
+                                // High part: 1–9, low part: 0–999999999 (9 digits zero-padded).
+                                final high = 1 + rng.nextInt(9);
+                                final low = rng.nextInt(1000000000);
+                                final seed = high * 1000000000 + low;
+                                setState(() {
+                                  _horizonSeedController.text = seed.toString();
+                                });
+                                if (_textController.text.trim().isNotEmpty) {
+                                  _sendTextToRust();
+                                }
+                              },
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                    ],
+                  ],
                   ElevatedButton(
                     onPressed: _textController.text.trim().isEmpty
                         ? null
@@ -1606,6 +1673,13 @@ class _DebugTable extends StatelessWidget {
       ('Triangles found', '${result.totalTriangles}'),
       ('Grid', '${result.rowCount} rows × ${result.columnCount} columns'),
       ('Data bits', '${result.bitCount}'),
+      (
+        'Error correction',
+        result.eccLevel.isEmpty
+            ? '—'
+            : '${result.eccLevel}: ${result.correctedBytes} bytes corrected, '
+                  '${result.erasedBytes} erased',
+      ),
     ];
     return Table(
       columnWidths: const {0: IntrinsicColumnWidth(), 1: FlexColumnWidth()},

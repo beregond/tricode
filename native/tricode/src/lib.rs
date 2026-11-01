@@ -87,7 +87,8 @@ use imageproc::contrast::{ThresholdType, threshold};
 use imageproc::distance_transform::Norm;
 use imageproc::morphology::dilate;
 use rayon::prelude::*;
-use reed_solomon_erasure::galois_8::ReedSolomon;
+
+mod reed_solomon;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -108,10 +109,12 @@ pub fn pack_payload(kind: &str, text: &str) -> Result<Vec<u8>, String> {
 ///
 /// Fallback chain:
 /// 1. Try to deserialise as the expected `{"type": ..., "value": ...}` envelope → return `(kind, value)`.
-/// 2. If the struct match fails but it *is* valid msgpack, serialise the decoded value as a JSON
-///    string and return `("plain", json)`.
-/// 3. If it is not msgpack at all, try to interpret the raw bytes as UTF-8 and return
-///    `("plain", string)`.
+/// 2. If the bytes are valid UTF-8, return them as `("plain", string)`: codes that hold bare
+///    text. This comes before generic msgpack because every ASCII byte is also a msgpack integer
+///    (`"abcde"` would read as `97`), while msgpack structures are rarely valid UTF-8, as their
+///    headers are bytes of `0x80` and up.
+/// 3. If it *is* valid msgpack, serialise the decoded value as a JSON string and return
+///    `("plain", json)`.
 /// 4. Only if all three steps fail do we return `Err`.
 pub fn unpack_payload(bytes: &[u8]) -> Result<(String, String), String> {
     // Step 1 — try to match the expected named-map envelope.
@@ -119,21 +122,21 @@ pub fn unpack_payload(bytes: &[u8]) -> Result<(String, String), String> {
         return Ok(envelope);
     }
 
-    // Step 2 — valid msgpack but wrong shape: decode to a generic JSON value and
-    // return the JSON representation so the caller still gets something useful.
-    let mut de2 = rmp_serde::Deserializer::new(bytes);
-    if let Ok(json_val) = serde_json::Value::deserialize(&mut de2) {
-        let json_str = serde_json::to_string(&json_val).unwrap_or_else(|_| json_val.to_string());
-        return Ok(("plain".to_string(), json_str));
-    }
-
-    // Step 3 — not msgpack at all: try raw UTF-8 bytes.
+    // Step 2 — bare UTF-8 text.
     if let Ok(s) = std::str::from_utf8(bytes) {
         return Ok(("plain".to_string(), s.to_string()));
     }
 
+    // Step 3 — valid msgpack but wrong shape: decode to a generic JSON value and
+    // return the JSON representation so the caller still gets something useful.
+    let mut de = rmp_serde::Deserializer::new(bytes);
+    if let Ok(json_val) = serde_json::Value::deserialize(&mut de) {
+        let json_str = serde_json::to_string(&json_val).unwrap_or_else(|_| json_val.to_string());
+        return Ok(("plain".to_string(), json_str));
+    }
+
     Err(format!(
-        "payload is not a recognised msgpack envelope, valid msgpack, or UTF-8 text ({} bytes)",
+        "payload is not a recognised msgpack envelope, UTF-8 text, or valid msgpack ({} bytes)",
         bytes.len()
     ))
 }
@@ -434,6 +437,7 @@ pub fn generate_image(
         horizon_seed: 0,
         mask: None,
         triangle_width: DEFAULT_TRIANGLE_WIDTH,
+        ecc_level: DEFAULT_ECC_LEVEL,
     })
     .map(|debug| debug.png_bytes)
     .unwrap_or_default()
@@ -455,14 +459,15 @@ pub struct GenerateImageParams<'a> {
     /// Triangle base width in pixels: odd, within [`MIN_TRIANGLE_WIDTH`]..=[`MAX_TRIANGLE_WIDTH`].
     /// Usually [`DEFAULT_TRIANGLE_WIDTH`]; larger values give a higher-resolution image.
     pub triangle_width: u32,
+    /// How much damage the code survives; higher levels need a larger grid.
+    pub ecc_level: EccLevel,
 }
 
 /// Generates a PNG image encoding the payload text, returning full debug info.
 pub fn generate_image_debug(params: GenerateImageParams<'_>) -> Result<GenerateDebug, String> {
     validate_triangle_width(params.triangle_width)?;
     let payload_bytes = pack_payload(params.payload_type, params.payload)?;
-    let encoded_data = reed_solomon_encode(payload_bytes)?;
-    create_image_from_binary_data(&encoded_data, &params)
+    create_image_from_payload(&payload_bytes, &params)
 }
 
 /// The triangle grid in pixel coordinates, shared by every cell so that neighbouring triangles
@@ -891,10 +896,35 @@ fn unmix_pixels(data: &[u8], width_squares: u32) -> impl Iterator<Item = Vec<u8>
         .map(move |mask| apply_mask(data, mask, width_squares))
 }
 
-fn create_image_from_binary_data(
-    encoded_data: &[u8],
+/// Bytes of data a `rows × cols` grid holds: every cell but the 8 orientation marks is a bit.
+fn grid_capacity(rows: usize, cols: usize) -> usize {
+    (rows * cols).saturating_sub(8) / 8
+}
+
+/// The smallest grid (as `(columns, rows)`) of the requested aspect ratio whose capacity holds
+/// `payload_len` bytes at `level`.
+fn grid_for_payload(payload_len: usize, width: u32, height: u32, level: EccLevel) -> (u32, u32) {
+    // Start from the ideal byte count and grow until the grid's own layout fits the payload.
+    let mut bytes =
+        ((payload_len + FRAME_OVERHEAD) as f64 / (1.0 - level.ecc_share())).ceil() as usize;
+    loop {
+        let (cols, rows) = find_optimal_factors((bytes * 8 + 8) as u32, width, height);
+        let capacity = grid_capacity(rows as usize, cols as usize);
+        let fits = payload_capacity(capacity, level);
+        if fits >= payload_len {
+            return (cols, rows);
+        }
+        bytes += (payload_len - fits).max(1);
+    }
+}
+
+fn create_image_from_payload(
+    payload: &[u8],
     params: &GenerateImageParams<'_>,
 ) -> Result<GenerateDebug, String> {
+    if payload.len() > u16::MAX as usize {
+        return Err(format!("payload of {} bytes is too long", payload.len()));
+    }
     let GenerateImageParams {
         width_ratio,
         height_ratio,
@@ -907,27 +937,28 @@ fn create_image_from_binary_data(
     let fg = argb_to_rgba(params.fg_color, true);
     let bg = argb_to_rgba(params.bg_color, false);
 
-    // Calculate total bits needed, we add 8 bits for border marks
-    let total_bits = (encoded_data.len() + 1) * 8;
-
     // Calculate dimensions maintaining the aspect ratio and ensuring enough bit squares
     let gcd_val = gcd(width_ratio, height_ratio);
     let normalized_width = width_ratio / gcd_val;
     let normalized_height = height_ratio / gcd_val;
-
-    // Find optimal integer dimensions using the previously written function
-    let (width_squares, height_squares) =
-        find_optimal_factors(total_bits as u32, normalized_width, normalized_height);
+    let (width_squares, height_squares) = grid_for_payload(
+        payload.len(),
+        normalized_width,
+        normalized_height,
+        params.ecc_level,
+    );
     check_image_pixels(width_squares, height_squares, triangle_width)?;
 
-    // Every cell except the 8 orientation marks carries a bit. Zero-pad the data to fill all of
-    // them *before* mixing, so the mask also covers the padding at the end of the grid instead of
-    // leaving it blank. The decoder unmixes the whole grid and drops bits past the encoded length.
+    // The codewords fill every whole byte of the grid. The few cells left over after the last
+    // byte are zero-padded *before* mixing, so the mask also covers them instead of leaving them
+    // blank.
+    let capacity = grid_capacity(height_squares as usize, width_squares as usize);
+    let encoded_data = encode_frame(payload, capacity, params.ecc_level)?;
     let data_capacity = ((width_squares * height_squares) as usize).saturating_sub(8);
-    let data_bits_used = (encoded_data.len() * 8).min(data_capacity);
+    let data_bits_used = encoded_data.len() * 8;
     let padding_bits = data_capacity - data_bits_used;
-    let mut padded = encoded_data.to_vec();
-    padded.resize(padded.len().max(data_capacity.div_ceil(8)), 0);
+    let mut padded = encoded_data.clone();
+    padded.resize(data_capacity.div_ceil(8), 0);
 
     let (data, mask_index) = mix_pixels(&padded, width_squares, height_squares, mask);
     let (colour_transitions, shared_edges) =
@@ -1162,149 +1193,199 @@ pub fn find_optimal_factors(c: u32, x: u32, y: u32) -> (u32, u32) {
     }
 }
 
-/// Applies Reed-Solomon error correction codes to the input data.
-/// The function adds parity shards (10 by default) to enable error correction.
-/// Returns the encoded data with both data and parity shards concatenated.
-pub fn reed_solomon_encode(data: Vec<u8>) -> Result<Vec<u8>, String> {
-    if data.is_empty() {
-        return Err("Input data is empty".to_string());
-    }
-
-    let data_shard_count = RS_DATA_SHARDS;
-    let parity_shard_count = RS_PARITY_SHARDS;
-
-    // Create Reed-Solomon encoder
-    let rs = ReedSolomon::new(data_shard_count, parity_shard_count)
-        .map_err(|e| format!("Failed to create Reed-Solomon encoder: {:?}", e))?;
-
-    // Calculate shard size (round up to accommodate all data)
-    let shard_size = data.len().div_ceil(data_shard_count);
-
-    // Create shards: split data into data_shard_count shards
-    let mut shards = Vec::new();
-    for i in 0..data_shard_count {
-        let start = i * shard_size;
-        let end = ((i + 1) * shard_size).min(data.len());
-
-        let mut shard = if start < data.len() {
-            data[start..end].to_vec()
-        } else {
-            Vec::new()
-        };
-
-        // Pad to shard_size
-        shard.resize(shard_size, 0);
-        shards.push(shard);
-    }
-
-    // Add empty parity shards
-    for _ in 0..parity_shard_count {
-        shards.push(vec![0u8; shard_size]);
-    }
-
-    // Encode to generate parity shards
-    rs.encode(&mut shards)
-        .map_err(|e| format!("Failed to encode: {:?}", e))?;
-
-    // Prepare output: original data length (4 bytes) + shard size (4 bytes) + all shards
-    let mut result = Vec::new();
-    result.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    result.extend_from_slice(&(shard_size as u32).to_le_bytes());
-
-    // Concatenate all shards
-    for shard in shards {
-        result.extend_from_slice(&shard);
-    }
-
-    Ok(result)
+/// How much of every codeword is spent on error correction. Not stored in the code: the decoder
+/// tries every level, and the frame's CRC tells which one fits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EccLevel {
+    /// About 7% of the bytes can be wrong.
+    Low,
+    /// About 15% of the bytes can be wrong.
+    Medium,
+    /// About 25% of the bytes can be wrong.
+    Quartile,
+    /// About 30% of the bytes can be wrong.
+    High,
 }
 
-/// Decodes and corrects data that was encoded with Reed-Solomon error correction.
-/// Can recover from up to parity_shard_count corrupted or missing shards.
-/// Returns the original data.
-pub fn reed_solomon_decode(encoded_data: Vec<u8>) -> Result<Vec<u8>, String> {
-    let (original_len, shards) = read_shards(&encoded_data)?;
+/// The level codes are generated at unless another is chosen.
+pub const DEFAULT_ECC_LEVEL: EccLevel = EccLevel::Medium;
 
-    // Create Reed-Solomon decoder
-    let rs = ReedSolomon::new(RS_DATA_SHARDS, RS_PARITY_SHARDS)
-        .map_err(|e| format!("Failed to create Reed-Solomon decoder: {:?}", e))?;
+impl EccLevel {
+    pub const ALL: [EccLevel; 4] = [
+        EccLevel::Low,
+        EccLevel::Medium,
+        EccLevel::Quartile,
+        EccLevel::High,
+    ];
 
-    let mut shards: Vec<Option<Vec<u8>>> = shards.into_iter().map(Some).collect();
-
-    // Verify and reconstruct if needed
-    rs.reconstruct(&mut shards)
-        .map_err(|e| format!("Failed to reconstruct: {:?}", e))?;
-
-    // Extract original data from data shards
-    let mut result = Vec::new();
-    for shard in shards.iter().take(RS_DATA_SHARDS).flatten() {
-        result.extend_from_slice(shard);
+    /// The level's name, as shown in the app.
+    pub fn name(self) -> &'static str {
+        match self {
+            EccLevel::Low => "Low",
+            EccLevel::Medium => "Medium",
+            EccLevel::Quartile => "Quartile",
+            EccLevel::High => "High",
+        }
     }
 
-    // Trim to original length
-    result.truncate(original_len);
-
-    Ok(result)
-}
-
-/// Shard counts used by [`reed_solomon_encode`] and [`reed_solomon_decode`].
-const RS_DATA_SHARDS: usize = 10;
-const RS_PARITY_SHARDS: usize = 10;
-
-/// Whether the parity shards of `encoded_data` match its data shards. [`reed_solomon_decode`]
-/// doesn't check this (with no shard missing, `reconstruct` has nothing to do), so it is how a
-/// correct reading is told apart from a wrong one whatever the payload format.
-fn reed_solomon_verifies(encoded_data: &[u8]) -> bool {
-    let Ok((_, shards)) = read_shards(encoded_data) else {
-        return false;
-    };
-    ReedSolomon::new(RS_DATA_SHARDS, RS_PARITY_SHARDS)
-        .and_then(|rs| rs.verify(&shards))
-        .unwrap_or(false)
-}
-
-/// Splits Reed-Solomon encoded data into the original data length and its shards.
-fn read_shards(encoded_data: &[u8]) -> Result<(usize, Vec<Vec<u8>>), String> {
-    if encoded_data.len() < 8 {
-        return Err("Encoded data is too short".to_string());
+    /// 0 = Low, 1 = Medium, 2 = Quartile, 3 = High; anything else is Medium.
+    pub fn from_u32(value: u32) -> Self {
+        match value {
+            0 => EccLevel::Low,
+            2 => EccLevel::Quartile,
+            3 => EccLevel::High,
+            _ => EccLevel::Medium,
+        }
     }
 
-    // Read metadata
-    let original_len = u32::from_le_bytes([
-        encoded_data[0],
-        encoded_data[1],
-        encoded_data[2],
-        encoded_data[3],
-    ]) as usize;
+    /// Share of every codeword's bytes that are correction bytes. A codeword corrects half as
+    /// many wrong bytes as it has correction bytes (or as many erased ones).
+    fn ecc_share(self) -> f64 {
+        match self {
+            EccLevel::Low => 0.14,
+            EccLevel::Medium => 0.30,
+            EccLevel::Quartile => 0.50,
+            EccLevel::High => 0.60,
+        }
+    }
+}
 
-    let shard_size = u32::from_le_bytes([
-        encoded_data[4],
-        encoded_data[5],
-        encoded_data[6],
-        encoded_data[7],
-    ]) as usize;
+/// Bytes of a frame around the payload: a 2-byte length before it and a 4-byte CRC-32 after.
+const FRAME_OVERHEAD: usize = 6;
 
-    let total_shards = RS_DATA_SHARDS + RS_PARITY_SHARDS;
+/// Splits `capacity` bytes into Reed-Solomon codewords for `level`, as `(data, ecc)` byte counts.
+/// Depends only on the grid's capacity and the level, so the decoder can rebuild it. Codewords
+/// differ in length by at most one byte. Empty when the capacity is too small for any frame.
+fn block_layout(capacity: usize, level: EccLevel) -> Vec<(usize, usize)> {
+    if capacity < FRAME_OVERHEAD + 2 {
+        return Vec::new();
+    }
+    let blocks = capacity.div_ceil(reed_solomon::MAX_CODEWORD);
+    let (base, longer) = (capacity / blocks, capacity % blocks);
+    (0..blocks)
+        .map(|i| {
+            let n = base + usize::from(i >= blocks - longer);
+            // An even number of correction bytes, at least 2, leaving at least one data byte.
+            let ecc = (2.0 * (n as f64 * level.ecc_share() / 2.0).round()) as usize;
+            let ecc = ecc.clamp(2, n - 1);
+            (n - ecc, ecc)
+        })
+        .collect()
+}
 
-    // Trim to expected length (caller may pass more data than needed)
-    let expected_len = total_shards
-        .checked_mul(shard_size)
-        .and_then(|len| len.checked_add(8))
-        .ok_or("Invalid shard size")?;
-    if encoded_data.len() < expected_len {
+/// Payload bytes a grid of `capacity` bytes holds at `level`.
+fn payload_capacity(capacity: usize, level: EccLevel) -> usize {
+    let data: usize = block_layout(capacity, level).iter().map(|&(k, _)| k).sum();
+    data.saturating_sub(FRAME_OVERHEAD).min(u16::MAX as usize)
+}
+
+/// Where each byte of the grid comes from, as `(codeword, index)`: byte 0 of every codeword, then
+/// byte 1 of every codeword, and so on. Interleaving spreads a damaged patch of the image over all
+/// codewords instead of overwhelming one of them.
+fn interleave_order(layout: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let longest = layout.iter().map(|&(k, e)| k + e).max().unwrap_or(0);
+    (0..longest)
+        .flat_map(|i| {
+            layout
+                .iter()
+                .enumerate()
+                .filter(move |&(_, &(k, e))| i < k + e)
+                .map(move |(block, _)| (block, i))
+        })
+        .collect()
+}
+
+/// Encodes `payload` into exactly `capacity` grid bytes at `level`: the frame
+/// `[length: u16 BE][payload][CRC-32 BE of length and payload]`, zero-padded to the data capacity,
+/// split into Reed-Solomon codewords and interleaved.
+pub fn encode_frame(payload: &[u8], capacity: usize, level: EccLevel) -> Result<Vec<u8>, String> {
+    if payload.len() > payload_capacity(capacity, level) {
         return Err(format!(
-            "Invalid encoded data length: expected {}, got {}",
-            expected_len,
-            encoded_data.len()
+            "{} payload bytes don't fit in {} grid bytes",
+            payload.len(),
+            capacity
         ));
     }
+    let layout = block_layout(capacity, level);
 
-    // Extract shards
-    let shards = encoded_data[8..expected_len]
-        .chunks(shard_size.max(1))
-        .map(<[u8]>::to_vec)
+    let mut frame = Vec::with_capacity(capacity);
+    frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    frame.extend_from_slice(payload);
+    frame.extend_from_slice(&crc32fast::hash(&frame).to_be_bytes());
+    frame.resize(layout.iter().map(|&(k, _)| k).sum(), 0);
+
+    let mut rest = frame.as_slice();
+    let mut codewords = Vec::with_capacity(layout.len());
+    for &(k, ecc) in &layout {
+        let (data, tail) = rest.split_at(k);
+        codewords.push(reed_solomon::encode(data, ecc)?);
+        rest = tail;
+    }
+    Ok(interleave_order(&layout)
+        .into_iter()
+        .map(|(block, i)| codewords[block][i])
+        .collect())
+}
+
+/// A frame recovered by [`decode_frame`].
+struct DecodedFrame {
+    payload: Vec<u8>,
+    /// Bytes the error correction had to change.
+    corrected_bytes: usize,
+}
+
+/// Reverse of [`encode_frame`] for one level. `erased[i]` marks grid bytes read from cells the
+/// decoder couldn't tell apart, which cost half as much correction as wrong bytes. Fails unless
+/// every codeword corrects and the CRC matches.
+fn decode_frame(bytes: &[u8], erased: &[bool], level: EccLevel) -> Result<DecodedFrame, String> {
+    let layout = block_layout(bytes.len(), level);
+    if layout.is_empty() {
+        return Err("grid too small".to_string());
+    }
+    let mut codewords: Vec<Vec<u8>> = layout
+        .iter()
+        .map(|&(k, e)| Vec::with_capacity(k + e))
         .collect();
-    Ok((original_len, shards))
+    let mut erasures: Vec<Vec<usize>> = vec![Vec::new(); layout.len()];
+    for (pos, (block, i)) in interleave_order(&layout).into_iter().enumerate() {
+        codewords[block].push(bytes[pos]);
+        if erased.get(pos).copied().unwrap_or(false) {
+            erasures[block].push(i);
+        }
+    }
+
+    let mut frame = Vec::new();
+    let mut corrected_bytes = 0;
+    for ((codeword, erasures), &(k, ecc)) in codewords.iter_mut().zip(&erasures).zip(&layout) {
+        // Erasures can be wrong too (a cell that only looked unsure), so retry without them.
+        let changed = reed_solomon::correct(codeword, ecc, erasures)
+            .or_else(|e| {
+                if erasures.is_empty() {
+                    Err(e)
+                } else {
+                    reed_solomon::correct(codeword, ecc, &[])
+                }
+            })
+            .map_err(|e| format!("{:?} codeword: {}", level, e))?;
+        corrected_bytes += changed;
+        frame.extend_from_slice(&codeword[..k]);
+    }
+
+    let &[hi, lo, ..] = frame.as_slice() else {
+        return Err("frame too short".to_string());
+    };
+    let len = u16::from_be_bytes([hi, lo]) as usize;
+    let end = 2 + len;
+    let crc = frame
+        .get(end..end + 4)
+        .ok_or_else(|| format!("{:?}: length {} exceeds the frame", level, len))?;
+    if crc32fast::hash(&frame[..end]).to_be_bytes() != crc {
+        return Err(format!("{:?}: CRC mismatch", level));
+    }
+    Ok(DecodedFrame {
+        payload: frame[2..end].to_vec(),
+        corrected_bytes,
+    })
 }
 
 /// Decodes a PNG image back to the original text payload.
@@ -1326,6 +1407,12 @@ pub struct DecodeDebug {
     /// Which decode attempt succeeded (or was last tried on failure):
     /// "lattice-fit", "naive", "cluster+pitch", any of them with a " ±5" suffix when found in the neighbourhood, or "all failed".
     pub decode_method: String,
+    /// Error-correction level the code was read at; `None` on failure.
+    pub ecc_level: Option<EccLevel>,
+    /// Bytes the error correction repaired: how damaged the code was.
+    pub corrected_bytes: usize,
+    /// Bytes read from cells the decoder was unsure about (see [`UNSURE_DARKNESS`]).
+    pub erased_bytes: usize,
 }
 
 pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
@@ -1515,6 +1602,9 @@ fn try_grid_strategies(gray_img: &GrayImage, ctx: &GridContext) -> DecodeDebug {
         bit_count: 0,
         annotated_png: Vec::new(),
         decode_method: String::new(),
+        ecc_level: None,
+        corrected_bytes: 0,
+        erased_bytes: 0,
     };
 
     // Each strategy yields grid estimates. Every estimate is tried as-is, then
@@ -1527,44 +1617,59 @@ fn try_grid_strategies(gray_img: &GrayImage, ctx: &GridContext) -> DecodeDebug {
         let mut last_err = String::from("no new candidates");
 
         for estimate in (strategy.estimates)(ctx) {
-            for (rows, cols) in with_neighbourhood(ctx, estimate) {
-                if !tried.insert((rows, cols)) {
-                    continue;
-                }
-                attempted += 1;
-                let lattice = ctx.lattice_for(rows, cols);
-                let cells = sample_cells(gray_img, rows, cols, &lattice);
-                let readings = FLIPS.map(|flip| (flip, pack_data_bits(&cells, flip)));
-                // Every reading is first required to verify (see `try_unmix_decode`), since the
-                // lenient fallbacks of `unpack_payload` also accept a mirrored reading of a code.
-                for (strict, (flip, (bits, bit_count))) in [true, false]
-                    .into_iter()
-                    .flat_map(|strict| readings.iter().map(move |reading| (strict, reading)))
-                {
-                    match try_unmix_decode(bits, cols, strict) {
-                        Ok((kind, text)) => {
-                            let mut method = if (rows, cols) == estimate {
-                                strategy.name.to_string()
-                            } else {
-                                format!("{} ±{}", strategy.name, GRID_SEARCH_RADIUS)
-                            };
-                            if let Some(name) = flip.name() {
-                                method += &format!(" ({})", name);
+            let grids: Vec<(usize, usize)> = with_neighbourhood(ctx, estimate)
+                .into_iter()
+                .filter(|&grid| tried.insert(grid))
+                .collect();
+            attempted += grids.len();
+            // Grids are tried in parallel: each costs every flip × mask × level, which adds up when
+            // nothing decodes. `find_map_first` still returns the best-ranked grid that decodes.
+            let first_err: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+            let found = grids
+                .par_iter()
+                .enumerate()
+                .find_map_first(|(index, &(rows, cols))| {
+                    let lattice = ctx.lattice_for(rows, cols);
+                    let cells = sample_cells(gray_img, rows, cols, &lattice);
+                    for flip in FLIPS {
+                        let packed = pack_data_bits(&cells, flip);
+                        match try_unmix_decode(&packed, rows, cols) {
+                            Ok(decoded) => return Some((rows, cols, flip, packed, decoded)),
+                            Err(e) if index == 0 && flip.name().is_none() => {
+                                if let Ok(mut slot) = first_err.lock() {
+                                    *slot = Some(e);
+                                }
                             }
-                            eprintln!("DEBUG '{}' succeeded: rows={} cols={}", method, rows, cols);
-                            return DecodeDebug {
-                                text: Some(text),
-                                content_type: kind,
-                                row_count: rows,
-                                column_count: cols,
-                                bit_count: *bit_count,
-                                decode_method: method,
-                                ..base
-                            };
+                            Err(_) => {}
                         }
-                        Err(e) => last_err = e,
                     }
+                    None
+                });
+            if let Some((rows, cols, flip, packed, decoded)) = found {
+                let mut method = if (rows, cols) == estimate {
+                    strategy.name.to_string()
+                } else {
+                    format!("{} ±{}", strategy.name, GRID_SEARCH_RADIUS)
+                };
+                if let Some(name) = flip.name() {
+                    method += &format!(" ({})", name);
                 }
+                eprintln!("DEBUG '{}' succeeded: rows={} cols={}", method, rows, cols);
+                return DecodeDebug {
+                    text: Some(decoded.text),
+                    content_type: decoded.kind,
+                    row_count: rows,
+                    column_count: cols,
+                    bit_count: packed.bit_count,
+                    decode_method: method,
+                    ecc_level: Some(decoded.level),
+                    corrected_bytes: decoded.corrected_bytes,
+                    erased_bytes: packed.erased.iter().filter(|&&e| e).count(),
+                    ..base
+                };
+            }
+            if let Some(e) = first_err.into_inner().ok().flatten() {
+                last_err = e;
             }
         }
         failures.push(format!(
@@ -1579,7 +1684,8 @@ fn try_grid_strategies(gray_img: &GrayImage, ctx: &GridContext) -> DecodeDebug {
         None => cluster_pitch_estimate(ctx),
     };
     let lattice = ctx.lattice_for(rows, cols);
-    let (_, bit_count) = pack_data_bits(&sample_cells(gray_img, rows, cols, &lattice), FLIPS[0]);
+    let bit_count =
+        pack_data_bits(&sample_cells(gray_img, rows, cols, &lattice), FLIPS[0]).bit_count;
     DecodeDebug {
         error: Some(failures.join("\n")),
         row_count: rows,
@@ -2560,14 +2666,13 @@ fn find_anchors(triangles: &[Triangle]) -> Option<Anchors> {
     })
 }
 
-/// Sample a small rectangular region around (cx, cy) in a grayscale image.
-/// Returns true if more than half the sampled pixels are dark (< 128).
-fn sample_region_is_dark(img: &GrayImage, cx: f32, cy: f32, radius: u32) -> bool {
+/// Fraction of the pixels in a small square around (cx, cy) that are dark (< 128).
+fn sample_region_darkness(img: &GrayImage, cx: f32, cy: f32, radius: u32) -> f32 {
     let r = radius as i32;
     let x0 = (cx as i32 - r).max(0) as u32;
     let y0 = (cy as i32 - r).max(0) as u32;
-    let x1 = ((cx as i32 + r) as u32).min(img.width().saturating_sub(1));
-    let y1 = ((cy as i32 + r) as u32).min(img.height().saturating_sub(1));
+    let x1 = ((cx as i32 + r).max(0) as u32).min(img.width().saturating_sub(1));
+    let y1 = ((cy as i32 + r).max(0) as u32).min(img.height().saturating_sub(1));
 
     let mut dark = 0u32;
     let mut total = 0u32;
@@ -2579,32 +2684,52 @@ fn sample_region_is_dark(img: &GrayImage, cx: f32, cy: f32, radius: u32) -> bool
             total += 1;
         }
     }
-    total > 0 && dark * 2 > total
+    if total == 0 {
+        return 0.0;
+    }
+    dark as f32 / total as f32
 }
 
-/// Tries every unmixed variant of `bits` until Reed-Solomon decoding and
-/// payload unpacking succeed. `strict` accepts only readings whose Reed-Solomon parity matches
-/// or that hold a payload envelope (so a few misread cells don't rule out an enveloped code);
-/// without it, anything [`unpack_payload`] can make sense of is accepted.
-fn try_unmix_decode(
-    bits: &[u8],
-    width_squares: usize,
-    strict: bool,
-) -> Result<(String, String), String> {
-    let decode = |candidate: Vec<u8>| {
-        let verified = strict && reed_solomon_verifies(&candidate);
-        let data = reed_solomon_decode(candidate)?;
-        if !strict || verified {
-            return unpack_payload(&data);
-        }
-        unpack_envelope(&data)
-            .ok_or_else(|| "parity doesn't match and payload is not an envelope".to_string())
-    };
+/// A cell whose sampled darkness falls strictly between these is neither clearly a triangle nor
+/// clearly background (the edge of a logo, a scratch, text drawn over the code), so the byte it
+/// belongs to is treated as an erasure.
+const UNSURE_DARKNESS: (f32, f32) = (0.2, 0.8);
+
+/// A decoded payload and how it was recovered.
+struct Decoded {
+    kind: String,
+    text: String,
+    level: EccLevel,
+    corrected_bytes: usize,
+}
+
+/// Tries every mask and error-correction level on `packed` until a frame decodes and its payload
+/// unpacks.
+fn try_unmix_decode(packed: &PackedBits, rows: usize, cols: usize) -> Result<Decoded, String> {
+    let capacity = grid_capacity(rows, cols);
+    if packed.bytes.len() < capacity {
+        return Err("grid has fewer bits than its capacity".to_string());
+    }
+    let erased = &packed.erased[..capacity];
     let mut last_err = "no masks to try".to_string();
-    for candidate in unmix_pixels(bits, width_squares as u32) {
-        match decode(candidate) {
-            Ok(result) => return Ok(result),
-            Err(e) => last_err = e,
+    for candidate in unmix_pixels(&packed.bytes, cols as u32) {
+        // Highest level first: a single-codeword grid at a level is also a valid codeword at every
+        // lower level (its generator's roots include theirs), so a lower level would decode it too
+        // but report the wrong level and correct less.
+        for level in EccLevel::ALL.into_iter().rev() {
+            let result = decode_frame(&candidate[..capacity], erased, level).and_then(|frame| {
+                let (kind, text) = unpack_payload(&frame.payload)?;
+                Ok(Decoded {
+                    kind,
+                    text,
+                    level,
+                    corrected_bytes: frame.corrected_bytes,
+                })
+            });
+            match result {
+                Ok(decoded) => return Ok(decoded),
+                Err(e) => last_err = e,
+            }
         }
     }
     Err(last_err)
@@ -2652,14 +2777,14 @@ const FLIPS: [Flip; 4] = [
     },
 ];
 
-/// Samples whether each grid cell is dark, at the centroid of its triangle. Indexed `[row][col]`
-/// as the cells appear in the image.
+/// Samples how dark each grid cell is (see [`sample_region_darkness`]), at the centroid of its
+/// triangle. Indexed `[row][col]` as the cells appear in the image.
 fn sample_cells(
     img: &GrayImage,
     row_count: usize,
     column_count: usize,
     lattice: &Lattice,
-) -> Vec<Vec<bool>> {
+) -> Vec<Vec<f32>> {
     if row_count < 2 || column_count < 2 {
         return Vec::new();
     }
@@ -2677,20 +2802,30 @@ fn sample_cells(
             (0..column_count)
                 .map(|col| {
                     let (cx, cy) = lattice.centroid(row, col);
-                    sample_region_is_dark(img, cx, cy, sample_radius)
+                    sample_region_darkness(img, cx, cy, sample_radius)
                 })
                 .collect()
         })
         .collect()
 }
 
+/// Data bits read off a grid.
+struct PackedBits {
+    /// Packed MSB first; the last byte may be partly padding.
+    bytes: Vec<u8>,
+    /// Per byte: whether any of its cells was unsure (see [`UNSURE_DARKNESS`]).
+    erased: Vec<bool>,
+    bit_count: usize,
+}
+
 /// Reads the data bits out of sampled `cells` in the order the renderer wrote them, undoing
 /// `flip`. The orientation-mark cells (first/last row, first 2 and last 2 columns) are skipped —
-/// they are not data bits. Returns the data bits packed into bytes (MSB first) and their count.
-fn pack_data_bits(cells: &[Vec<bool>], flip: Flip) -> (Vec<u8>, usize) {
+/// they are not data bits.
+fn pack_data_bits(cells: &[Vec<f32>], flip: Flip) -> PackedBits {
     let row_count = cells.len();
     let column_count = cells.first().map_or(0, Vec::len);
     let mut bits: Vec<bool> = Vec::new();
+    let mut unsure: Vec<bool> = Vec::new();
 
     for row in 0..row_count {
         for col in 0..column_count {
@@ -2714,7 +2849,9 @@ fn pack_data_bits(cells: &[Vec<bool>], flip: Flip) -> (Vec<u8>, usize) {
             } else {
                 col
             };
-            bits.push(cells[image_row][image_col]);
+            let darkness = cells[image_row][image_col];
+            bits.push(darkness > 0.5);
+            unsure.push(UNSURE_DARKNESS.0 < darkness && darkness < UNSURE_DARKNESS.1);
         }
     }
 
@@ -2730,8 +2867,16 @@ fn pack_data_bits(cells: &[Vec<bool>], flip: Flip) -> (Vec<u8>, usize) {
                 .fold(0u8, |acc, (i, &b)| acc | ((b as u8) << (7 - i)))
         })
         .collect();
+    let erased = unsure
+        .chunks(8)
+        .map(|chunk| chunk.contains(&true))
+        .collect();
 
-    (bytes, bit_count)
+    PackedBits {
+        bytes,
+        erased,
+        bit_count,
+    }
 }
 
 /// Draw bounding-box rectangles on the annotated image.
@@ -2829,6 +2974,7 @@ mod tests {
             horizon_seed: 42,
             mask: None,
             triangle_width,
+            ecc_level: DEFAULT_ECC_LEVEL,
         })
         .expect("generation failed")
     }
@@ -3046,19 +3192,21 @@ mod tests {
         assert_fixtures_decode_flipped(true, true, "flipped both ways");
     }
 
-    /// Codes without a payload envelope must decode the same in every orientation, so telling
-    /// the right reading apart can't rely on the envelope. Compared with the unflipped decode
-    /// rather than the payload, because how bare bytes are unpacked is up to `unpack_payload`.
+    /// Codes holding bare UTF-8 instead of a payload envelope must decode in every orientation,
+    /// so telling the right reading apart can't rely on the envelope.
     #[test]
     fn decodes_flipped_codes_without_an_envelope() {
         for style in STYLES {
             for ratio in RATIOS {
                 // Read unflipped, a horizontally flipped 1×1 code of length 218 unpacks as the
                 // msgpack integer 11, so it fails when only the envelope is checked.
-                for len in [5, 40, 150, 218] {
-                    let encoded = reed_solomon_encode(payload(len).into_bytes()).expect("encode");
-                    let generated = create_image_from_binary_data(
-                        &encoded,
+                let texts = [5, 40, 150, 218]
+                    .map(payload)
+                    .into_iter()
+                    .chain(["a".to_string(), "zażółć gęślą jaźń 🔺".to_string()]);
+                for text in texts {
+                    let generated = create_image_from_payload(
+                        text.as_bytes(),
                         &GenerateImageParams {
                             payload: "",
                             payload_type: "",
@@ -3070,31 +3218,231 @@ mod tests {
                             horizon_seed: 42,
                             mask: None,
                             triangle_width: DEFAULT_TRIANGLE_WIDTH,
+                            ecc_level: DEFAULT_ECC_LEVEL,
                         },
                     )
                     .expect("generation failed");
-                    let unflipped = decode_image(&generated.png_bytes).expect("decode errored");
-                    let label = format!("{:?} {:?} len={}", style, ratio, len);
-                    assert_eq!(unflipped.decode_method, "lattice-fit", "{label}: unflipped");
-                    for (horizontally, vertically) in [(true, false), (false, true), (true, true)] {
-                        let png = flip(&generated.png_bytes, horizontally, vertically);
-                        let decoded = decode_image(&png).expect("decode errored");
-                        let label = format!("{label} flipped h={} v={}", horizontally, vertically);
-                        assert_eq!(
-                            (&decoded.content_type, &decoded.text),
-                            (&unflipped.content_type, &unflipped.text),
-                            "{label}: decodes differently ({})",
-                            decoded.decode_method
+                    for flip_case in FLIPS {
+                        let png = flip(
+                            &generated.png_bytes,
+                            flip_case.horizontal,
+                            flip_case.vertical,
                         );
-                        assert!(
-                            decoded.decode_method.starts_with("lattice-fit (flipped "),
-                            "{label}: flip not detected ({})",
-                            decoded.decode_method
+                        let decoded = decode_image(&png).expect("decode errored");
+                        let label = format!("{:?} {:?} {:?} {:?}", style, ratio, text, flip_case);
+                        assert_eq!(
+                            (decoded.content_type.as_str(), decoded.text.as_deref()),
+                            ("plain", Some(text.as_str())),
+                            "{label}: wrong text"
+                        );
+                        let expected_method = match flip_case.name() {
+                            Some(name) => format!("lattice-fit ({name})"),
+                            None => "lattice-fit".to_string(),
+                        };
+                        assert_eq!(
+                            decoded.decode_method, expected_method,
+                            "{label}: wrong method"
                         );
                     }
                 }
             }
         }
+    }
+
+    #[test]
+    fn unpacks_bare_utf8_before_generic_msgpack() {
+        for text in ["a", "abcde", "zażółć gęślą jaźń"] {
+            assert_eq!(
+                unpack_payload(text.as_bytes()),
+                Ok(("plain".to_string(), text.to_string()))
+            );
+        }
+        // Not UTF-8, so still read as msgpack: `true`.
+        assert_eq!(
+            unpack_payload(&[0xc3]),
+            Ok(("plain".to_string(), "true".to_string()))
+        );
+        let packed = pack_payload("url", "https://example.com").expect("pack");
+        assert_eq!(
+            unpack_payload(&packed),
+            Ok(("url".to_string(), "https://example.com".to_string()))
+        );
+    }
+
+    fn generate_with_level(style: ImageStyle, len: usize, ecc_level: EccLevel) -> GenerateDebug {
+        generate_image_debug(GenerateImageParams {
+            payload: &payload(len),
+            payload_type: "text",
+            width_ratio: 16,
+            height_ratio: 9,
+            style,
+            fg_color: 0xFF000000,
+            bg_color: 0xFFFFFFFF,
+            horizon_seed: 42,
+            mask: None,
+            triangle_width: DEFAULT_TRIANGLE_WIDTH,
+            ecc_level,
+        })
+        .expect("generation failed")
+    }
+
+    /// What is painted over the centre of a code.
+    #[derive(Debug, Clone, Copy)]
+    enum Cover {
+        Black,
+        White,
+        /// A fine 3 px checkerboard: detail like a logo or text, which leaves cells unsure.
+        Checker,
+    }
+
+    /// Paints `cover` over a centred rectangle of `share` of the image area, with the image's
+    /// aspect ratio.
+    fn cover_centre(png: &[u8], share: f64, cover: Cover) -> Vec<u8> {
+        let mut img = image::load_from_memory(png)
+            .expect("load failed")
+            .to_luma8();
+        let (w, h) = (img.width(), img.height());
+        let (cw, ch) = (
+            (w as f64 * share.sqrt()) as u32,
+            (h as f64 * share.sqrt()) as u32,
+        );
+        let (x0, y0) = ((w - cw) / 2, (h - ch) / 2);
+        for y in y0..y0 + ch {
+            for x in x0..x0 + cw {
+                let luma = match cover {
+                    Cover::Black => 0,
+                    Cover::White => 255,
+                    Cover::Checker if (x / 3 + y / 3) % 2 == 0 => 0,
+                    Cover::Checker => 255,
+                };
+                img.put_pixel(x, y, image::Luma([luma]));
+            }
+        }
+        let mut out = Vec::new();
+        PngEncoder::new(&mut out)
+            .write_image(img.as_raw(), w, h, ExtendedColorType::L8)
+            .expect("encode failed");
+        out
+    }
+
+    #[test]
+    fn every_level_decodes_and_is_detected() {
+        let mut previous_cells = 0;
+        for level in EccLevel::ALL {
+            let generated = generate_with_level(ImageStyle::Tiles, 150, level);
+            let cells = generated.grid_rows * generated.grid_columns;
+            assert!(cells > previous_cells, "{level:?}: grid didn't grow");
+            previous_cells = cells;
+            let decoded = decode_image(&generated.png_bytes).expect("decode errored");
+            assert_eq!(
+                decoded.text.as_deref(),
+                Some(payload(150).as_str()),
+                "{level:?}"
+            );
+            assert_eq!(decoded.ecc_level, Some(level), "{level:?}: wrong level");
+            assert_eq!(
+                decoded.corrected_bytes, 0,
+                "{level:?}: clean code needed correction"
+            );
+        }
+    }
+
+    /// Share of the image each level must survive being covered at its centre. Measured limits
+    /// (len 40 to 400 at 16:9) are a little higher; a fine pattern costs less than a solid one
+    /// because its cells read as unsure and become erasures.
+    const SURVIVABLE_COVER: [(EccLevel, f64, f64); 4] = [
+        (EccLevel::Low, 0.02, 0.05),
+        (EccLevel::Medium, 0.06, 0.14),
+        (EccLevel::Quartile, 0.15, 0.30),
+        (EccLevel::High, 0.18, 0.40),
+    ];
+
+    #[test]
+    fn survives_a_covered_centre() {
+        for (level, solid, detailed) in SURVIVABLE_COVER {
+            for style in [ImageStyle::Tiles, ImageStyle::Horizon] {
+                let generated = generate_with_level(style, 150, level);
+                for (cover, share) in [
+                    (Cover::Black, solid),
+                    (Cover::White, solid),
+                    (Cover::Checker, detailed),
+                ] {
+                    let label = format!("{style:?} {level:?} {cover:?} {share}");
+                    let png = cover_centre(&generated.png_bytes, share, cover);
+                    let decoded = decode_image(&png).expect("decode errored");
+                    assert_eq!(
+                        decoded.text.as_deref(),
+                        Some(payload(150).as_str()),
+                        "{label}: {:?}",
+                        decoded.error
+                    );
+                    assert_eq!(decoded.ecc_level, Some(level), "{label}: wrong level");
+                    assert!(decoded.corrected_bytes > 0, "{label}: nothing was damaged");
+                    if let Cover::Checker = cover {
+                        assert!(decoded.erased_bytes > 0, "{label}: no erasures");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fails_when_damage_exceeds_the_level() {
+        let generated = generate_with_level(ImageStyle::Tiles, 40, EccLevel::Low);
+        let png = cover_centre(&generated.png_bytes, 0.2, Cover::Black);
+        let decoded = decode_image(&png).expect("decode errored");
+        assert_eq!(decoded.text, None);
+        assert_eq!(decoded.decode_method, "all failed");
+    }
+
+    #[test]
+    fn survives_damage_and_a_flip_together() {
+        let generated = generate_with_level(ImageStyle::Stain, 150, EccLevel::High);
+        let damaged = cover_centre(&generated.png_bytes, 0.15, Cover::Black);
+        let decoded = decode_image(&flip(&damaged, true, false)).expect("decode errored");
+        assert_eq!(decoded.text.as_deref(), Some(payload(150).as_str()));
+        assert_eq!(decoded.decode_method, "lattice-fit (flipped horizontally)");
+    }
+
+    #[test]
+    fn block_layout_fills_the_capacity() {
+        for capacity in [8, 9, 50, 254, 255, 256, 600, 1070, 5000] {
+            for level in EccLevel::ALL {
+                let layout = block_layout(capacity, level);
+                let total: usize = layout.iter().map(|&(k, e)| k + e).sum();
+                assert_eq!(total, capacity, "{capacity} {level:?}");
+                for &(k, ecc) in &layout {
+                    assert!(k >= 1 && ecc >= 2 && ecc % 2 == 0, "{capacity} {level:?}");
+                    assert!(
+                        k + ecc <= reed_solomon::MAX_CODEWORD,
+                        "{capacity} {level:?}"
+                    );
+                }
+            }
+        }
+        assert!(block_layout(7, EccLevel::Low).is_empty());
+    }
+
+    #[test]
+    fn frame_round_trips_and_never_decodes_at_a_higher_level() {
+        let payload = b"tricode frame";
+        for capacity in [60, 300, 1070] {
+            for level in EccLevel::ALL {
+                let bytes = encode_frame(payload, capacity, level).expect("encode");
+                assert_eq!(bytes.len(), capacity);
+                let erased = vec![false; capacity];
+                let frame = decode_frame(&bytes, &erased, level).expect("decode");
+                assert_eq!(frame.payload, payload);
+                // Lower levels may decode it too (see `try_unmix_decode`), higher ones must not.
+                for higher in EccLevel::ALL.into_iter().filter(|&l| l as u8 > level as u8) {
+                    assert!(
+                        decode_frame(&bytes, &erased, higher).is_err(),
+                        "{capacity}: {level:?} decoded as {higher:?}"
+                    );
+                }
+            }
+        }
+        assert!(encode_frame(&[0; 100], 40, EccLevel::High).is_err());
     }
 
     #[test]
@@ -3169,6 +3517,7 @@ mod tests {
                 horizon_seed: 0,
                 mask: None,
                 triangle_width,
+                ecc_level: DEFAULT_ECC_LEVEL,
             });
             assert!(result.is_err(), "{} px was accepted", triangle_width);
         }
@@ -3201,6 +3550,7 @@ mod tests {
             horizon_seed: 0,
             mask: None,
             triangle_width: MIN_TRIANGLE_WIDTH,
+            ecc_level: DEFAULT_ECC_LEVEL,
         })
         .expect_err("a 40 kB payload fits");
         assert!(error.contains("shorten the payload"), "{error}");
@@ -3398,6 +3748,7 @@ mod tests {
                 horizon_seed: 0,
                 mask: Some(index),
                 triangle_width: DEFAULT_TRIANGLE_WIDTH,
+                ecc_level: DEFAULT_ECC_LEVEL,
             })
             .expect("generation failed");
             assert_eq!(generated.mask_index, index, "{name}");
@@ -3425,6 +3776,7 @@ mod tests {
             horizon_seed: 0,
             mask,
             triangle_width: DEFAULT_TRIANGLE_WIDTH,
+            ecc_level: DEFAULT_ECC_LEVEL,
         };
         let auto = generate_image_debug(params(None)).expect("generation failed");
         for (index, name) in MASK_NAMES.iter().enumerate() {
@@ -3441,7 +3793,7 @@ mod tests {
     #[test]
     fn masks_cover_the_padding_at_the_end_of_the_grid() {
         for (index, name) in MASK_NAMES.iter().enumerate() {
-            // 14×41 grid: the data ends partway through the last row, leaving 22 padding cells.
+            // The codewords fill whole bytes, so the cells after the last byte are padding.
             let generated = generate_image_debug(GenerateImageParams {
                 payload: &payload(5),
                 payload_type: "text",
@@ -3453,9 +3805,12 @@ mod tests {
                 horizon_seed: 0,
                 mask: Some(index),
                 triangle_width: DEFAULT_TRIANGLE_WIDTH,
+                ecc_level: DEFAULT_ECC_LEVEL,
             })
             .expect("generation failed");
-            assert_eq!(generated.padding_bits, 22);
+            let cells = (generated.grid_rows * generated.grid_columns) as usize - 8;
+            assert_eq!(generated.padding_bits, cells % 8);
+            assert!(generated.padding_bits > 0, "{name}: no padding to check");
 
             let gray = image::load_from_memory(&generated.png_bytes)
                 .expect("load failed")
@@ -3464,8 +3819,12 @@ mod tests {
             let anchors = find_anchors(&triangles).expect("no anchors");
             let triangles = discard_merged_triangles(triangles, &anchors);
             let fit = fit_lattice(&triangles, &anchors).expect("no lattice");
-            let cells = sample_cells(&gray, fit.rows, fit.cols, &fit.lattice);
-            let (bytes, bit_count) = pack_data_bits(&cells, FLIPS[0]);
+            let PackedBits {
+                bytes, bit_count, ..
+            } = pack_data_bits(
+                &sample_cells(&gray, fit.rows, fit.cols, &fit.lattice),
+                FLIPS[0],
+            );
             // The padding is zeros, so after XOR every padding cell must show the mask itself.
             let mask = MASKS[index];
             let cols = generated.grid_columns as usize;
