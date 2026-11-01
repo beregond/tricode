@@ -3,4 +3,7 @@
 # Extra arguments are passed to `cargo test`, e.g. `tricode-test decodes_fixtures -- --nocapture`.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# Overflow checks stay on, as in the app's debug build, so an overflow fails a test instead of
+# silently wrapping.
+export CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true
 exec cargo test -p tricode --release "$@"

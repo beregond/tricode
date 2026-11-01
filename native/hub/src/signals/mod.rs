@@ -78,5 +78,5 @@ pub struct GeneratedImage {
     pub mask_name: String,
     pub colour_transitions: u32, // shared triangle edges between cells of different colour
     pub shared_edges: u32,       // all triangle edges shared by two cells
-    pub overlay_decodes: Option<bool>, // whether the code still decodes with its overlay; None without one
+    pub decode_warning: String,  // why the code doesn't read back; empty when it decodes
 }

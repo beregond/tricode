@@ -68,7 +68,7 @@ impl Notifiable<SmallText> for GenerationActor {
                     .to_string(),
                 colour_transitions: debug.colour_transitions as u32,
                 shared_edges: debug.shared_edges as u32,
-                overlay_decodes: debug.overlay_decodes,
+                decode_warning: debug.decode_warning.unwrap_or_default(),
             },
             Err(error) => GeneratedImage {
                 png_bytes: Vec::new(),
@@ -82,7 +82,7 @@ impl Notifiable<SmallText> for GenerationActor {
                 mask_name: String::new(),
                 colour_transitions: 0,
                 shared_edges: 0,
-                overlay_decodes: None,
+                decode_warning: String::new(),
             },
         };
         signal.send_signal_to_dart();

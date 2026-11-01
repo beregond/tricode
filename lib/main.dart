@@ -111,33 +111,49 @@ Future<void> main() async {
   runApp(const MyApp());
 }
 
+/// The app's brand colour; both colour schemes are generated from it.
+const _primaryColor = Color(0xFF90add3);
+
+/// Light, dark or follow the system; picked in the settings dialog.
+final themeMode = ValueNotifier(ThemeMode.system);
+
+/// A colour scheme generated from [_primaryColor], keeping it as the exact primary colour.
+ColorScheme _colorScheme(Brightness brightness) => ColorScheme.fromSeed(
+  seedColor: _primaryColor,
+  brightness: brightness,
+  dynamicSchemeVariant: DynamicSchemeVariant.fidelity,
+).copyWith(primary: _primaryColor, onPrimary: Colors.white);
+
+ThemeData _theme(Brightness brightness) {
+  final colorScheme = _colorScheme(brightness);
+  return ThemeData(
+    colorScheme: colorScheme,
+    appBarTheme: AppBarTheme(
+      backgroundColor: colorScheme.primary,
+      foregroundColor: colorScheme.onPrimary,
+    ),
+    tabBarTheme: TabBarThemeData(
+      labelColor: colorScheme.onPrimary,
+      unselectedLabelColor: colorScheme.onPrimary.withValues(alpha: 0.7),
+      indicatorColor: colorScheme.onPrimary,
+    ),
+  );
+}
+
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
+    return ValueListenableBuilder(
+      valueListenable: themeMode,
+      builder: (context, mode, _) => MaterialApp(
+        title: 'Tricode',
+        theme: _theme(Brightness.light),
+        darkTheme: _theme(Brightness.dark),
+        themeMode: mode,
+        home: const MyHomePage(),
       ),
-      home: const MyHomePage(),
     );
   }
 }
@@ -184,6 +200,8 @@ class _MyHomePageState extends State<MyHomePage>
   int _selectedStyle = 0; // 0 = Tiles, 1 = Stain
   int _eccLevel = 1; // index into _eccLevelNames; 1 = Medium
   bool _showAdvanced = false; // Write tab options beyond the text
+  bool _showPresets = false; // colour preset chips under the pickers
+  bool _horizonColoursOffered = false; // see the style selector
   bool? _decodeSuccess;
   String? _decodeText;
   String _decodeContentType = '';
@@ -790,7 +808,6 @@ class _MyHomePageState extends State<MyHomePage>
       length: 2,
       child: Scaffold(
         appBar: AppBar(
-          backgroundColor: Theme.of(context).colorScheme.inversePrimary,
           title: const Text('Tricode'),
           actions: [
             Padding(
@@ -804,22 +821,56 @@ class _MyHomePageState extends State<MyHomePage>
                     builder: (context) => StatefulBuilder(
                       builder: (context, setDialogState) => AlertDialog(
                         title: const Text('Settings'),
-                        content: CheckboxListTile(
-                          title: const Text('Show debug info'),
-                          value: _showDebugInfo,
-                          onChanged: (value) {
-                            setDialogState(() {});
-                            final enabled = value ?? false;
-                            setState(() {
-                              _showDebugInfo = enabled;
-                              if (!enabled && _selectedPayloadType == 'plain') {
-                                _selectedPayloadType = 'text';
-                              }
-                              if (!enabled) {
-                                _selectedMask = null;
-                              }
-                            });
-                          },
+                        content: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            CheckboxListTile(
+                              title: const Text('Show debug info'),
+                              value: _showDebugInfo,
+                              onChanged: (value) {
+                                setDialogState(() {});
+                                final enabled = value ?? false;
+                                setState(() {
+                                  _showDebugInfo = enabled;
+                                  if (!enabled &&
+                                      _selectedPayloadType == 'plain') {
+                                    _selectedPayloadType = 'text';
+                                  }
+                                  if (!enabled) {
+                                    _selectedMask = null;
+                                  }
+                                });
+                              },
+                            ),
+                            const SizedBox(height: 16),
+                            const Text('Theme'),
+                            const SizedBox(height: 8),
+                            SegmentedButton<ThemeMode>(
+                              segments: const [
+                                ButtonSegment(
+                                  value: ThemeMode.system,
+                                  icon: Icon(Icons.brightness_auto),
+                                  label: Text('System'),
+                                ),
+                                ButtonSegment(
+                                  value: ThemeMode.light,
+                                  icon: Icon(Icons.light_mode),
+                                  label: Text('Light'),
+                                ),
+                                ButtonSegment(
+                                  value: ThemeMode.dark,
+                                  icon: Icon(Icons.dark_mode),
+                                  label: Text('Dark'),
+                                ),
+                              ],
+                              selected: {themeMode.value},
+                              onSelectionChanged: (selection) {
+                                setDialogState(() {});
+                                themeMode.value = selection.first;
+                              },
+                            ),
+                          ],
                         ),
                         actions: [
                           TextButton(
@@ -1086,6 +1137,15 @@ class _MyHomePageState extends State<MyHomePage>
                     onSelectionChanged: (selection) {
                       setState(() {
                         _selectedStyle = selection.first;
+                        // The first switch to Horizon suggests its own colours,
+                        // but only over the untouched black and white default.
+                        if (_selectedStyle == 2 && !_horizonColoursOffered) {
+                          _horizonColoursOffered = true;
+                          if (colorPresets.first.matches(_fgColor, _bgColor)) {
+                            _fgColor = zeroDawnPreset.foreground;
+                            _bgColor = zeroDawnPreset.background;
+                          }
+                        }
                       });
                       if (_textController.text.trim().isNotEmpty) {
                         _sendTextToRust();
@@ -1120,8 +1180,42 @@ class _MyHomePageState extends State<MyHomePage>
                           }
                         },
                       ),
+                      const SizedBox(width: 16),
+                      TextButton.icon(
+                        onPressed: () =>
+                            setState(() => _showPresets = !_showPresets),
+                        icon: Icon(
+                          _showPresets ? Icons.expand_less : Icons.palette,
+                        ),
+                        label: const Text('Swatches'),
+                      ),
                     ],
                   ),
+                  if (_showPresets) ...[
+                    const SizedBox(height: 12),
+                    Wrap(
+                      alignment: WrapAlignment.center,
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final preset in colorPresets)
+                          ChoiceChip(
+                            avatar: _PresetPreview(preset: preset),
+                            label: Text(preset.name),
+                            selected: preset.matches(_fgColor, _bgColor),
+                            onSelected: (_) {
+                              setState(() {
+                                _fgColor = preset.foreground;
+                                _bgColor = preset.background;
+                              });
+                              if (_textController.text.trim().isNotEmpty) {
+                                _sendTextToRust();
+                              }
+                            },
+                          ),
+                      ],
+                    ),
+                  ],
                   const SizedBox(height: 16),
                   // Size, error correction and the rest are tucked away, so
                   // the tab stays simple unless the user wants to tweak them.
@@ -1462,13 +1556,13 @@ class _MyHomePageState extends State<MyHomePage>
                         ),
                       ],
                     ),
-                    if (_generateDebug?.overlayDecodes == false) ...[
+                    if (_generateDebug?.decodeWarning case final warning?
+                        when warning.isNotEmpty) ...[
                       const SizedBox(height: 12),
                       Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 16.0),
                         child: Text(
-                          'This code doesn\'t decode with its overlay. Make the '
-                          'overlay smaller or raise the error correction.',
+                          warning,
                           textAlign: TextAlign.center,
                           style: TextStyle(
                             color: Theme.of(context).colorScheme.error,
@@ -1967,6 +2061,85 @@ class _InstalledFontPickerState extends State<_InstalledFontPicker> {
   }
 }
 
+/// A ready-made pair of code colours offered above the colour pickers.
+@visibleForTesting
+class ColorPreset {
+  const ColorPreset(this.name, this.foreground, this.background);
+
+  final String name;
+  final Color foreground;
+  final Color background;
+
+  bool matches(Color foreground, Color background) =>
+      foreground.toARGB32() == this.foreground.toARGB32() &&
+      background.toARGB32() == this.background.toARGB32();
+}
+
+/// Suggested the first time the Horizon style is picked.
+@visibleForTesting
+const zeroDawnPreset = ColorPreset(
+  'Zero Dawn',
+  Color(0xFF90ADD3),
+  Color(0xFFC0CAD7),
+);
+
+/// The two colours of a preset must differ in brightness by at least
+/// `MIN_LUMA_GAP` (native/tricode/src/lib.rs); either may be the lighter one.
+@visibleForTesting
+const colorPresets = [
+  ColorPreset('Classic', Color(0xFF000000), Color(0xFFFFFFFF)),
+  zeroDawnPreset,
+  ColorPreset('Ink', Color(0xFF1B2A41), Color(0xFFF4EFE6)),
+  ColorPreset('Forest', Color(0xFF1F4D3A), Color(0xFFE8F0E3)),
+  ColorPreset('Terracotta', Color(0xFF7A2E1F), Color(0xFFF6E7D8)),
+  ColorPreset('Plum', Color(0xFF4A1F4D), Color(0xFFF3E9F2)),
+  ColorPreset('Night', Color(0xFFF2F4F5), Color(0xFF1E2A33)),
+  ColorPreset('Blueprint', Color(0xFFFFFFFF), Color(0xFF1F4E79)),
+];
+
+/// A small triangle in the preset's triangle colour on its background.
+class _PresetPreview extends StatelessWidget {
+  const _PresetPreview({required this.preset});
+
+  final ColorPreset preset;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: preset.background,
+        border: Border.all(color: Colors.grey),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: CustomPaint(
+        size: const Size.square(18),
+        painter: _TrianglePainter(preset.foreground),
+      ),
+    );
+  }
+}
+
+class _TrianglePainter extends CustomPainter {
+  _TrianglePainter(this.color);
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final inset = size.width * 0.2;
+    final path = Path()
+      ..moveTo(size.width / 2, inset)
+      ..lineTo(size.width - inset, size.height - inset)
+      ..lineTo(inset, size.height - inset)
+      ..close();
+    canvas.drawPath(path, Paint()..color = color);
+  }
+
+  @override
+  bool shouldRepaint(_TrianglePainter oldDelegate) =>
+      oldDelegate.color != color;
+}
+
 class _ColorSwatch extends StatelessWidget {
   const _ColorSwatch({
     required this.label,
@@ -2173,8 +2346,7 @@ class _GenerateDebugTable extends StatelessWidget {
         '${result.colourTransitions} / ${result.sharedEdges} edges'
             ' (${result.sharedEdges == 0 ? 0 : (100 * result.colourTransitions / result.sharedEdges).toStringAsFixed(1)}%)',
       ),
-      if (result.overlayDecodes case final decodes?)
-        ('Overlay decodes', decodes ? 'yes' : 'no'),
+      ('Decodes', result.decodeWarning.isEmpty ? 'yes' : 'no'),
     ];
     return Table(
       columnWidths: const {0: IntrinsicColumnWidth(), 1: FlexColumnWidth()},

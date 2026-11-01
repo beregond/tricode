@@ -86,7 +86,7 @@ use image::{
     ExtendedColorType, GrayImage, ImageBuffer, ImageEncoder, ImageFormat, ImageReader, Rgba,
     RgbaImage,
 };
-use imageproc::contrast::{ThresholdType, threshold};
+use imageproc::contrast::{ThresholdType, otsu_level, threshold};
 use imageproc::distance_transform::Norm;
 use imageproc::morphology::dilate;
 use rayon::prelude::*;
@@ -620,8 +620,8 @@ pub struct GenerateDebug {
     pub mask_index: usize,     // index into MASKS of the mask the data was XORed with
     pub colour_transitions: usize, // shared triangle edges between cells of different colour
     pub shared_edges: usize,   // all triangle edges shared by two cells
-    /// Whether the code still decodes with its overlay; `None` without one.
-    pub overlay_decodes: Option<bool>,
+    /// Why the generated code doesn't read back; `None` when it decodes to the payload.
+    pub decode_warning: Option<String>,
 }
 
 /// Convert a Flutter/Android-style ARGB `u32` (`0xAARRGGBB`) to an `Rgba<u8>`.
@@ -702,13 +702,36 @@ pub fn generate_image_debug(params: GenerateImageParams<'_>) -> Result<GenerateD
     validate_triangle_width(params.triangle_width)?;
     let payload_bytes = pack_payload(params.payload_type, params.payload)?;
     let mut debug = create_image_from_payload(&payload_bytes, &params)?;
-    if params.overlay.is_some() {
-        // The overlay's share is kept within what the level repairs, but what it covers varies;
-        // reading the code back tells for sure.
-        let decoded = decode_image(&debug.png_bytes)?;
-        debug.overlay_decodes = Some(decoded.text.as_deref() == Some(params.payload));
-    }
+    debug.decode_warning = decode_warning(&debug.png_bytes, &params);
     Ok(debug)
+}
+
+/// Reads a generated code back and says why it doesn't decode, if it doesn't. Colours the
+/// decoder can't tell apart are caught first, which skips a slow decode that is bound to fail.
+fn decode_warning(png: &[u8], params: &GenerateImageParams<'_>) -> Option<String> {
+    // Converted exactly as the decoder converts the image.
+    let luma = |argb| {
+        let pixel = RgbaImage::from_pixel(1, 1, argb_to_rgba(argb, true));
+        image::DynamicImage::ImageRgba8(pixel).to_luma8()[(0, 0)][0]
+    };
+    let (fg, bg) = (luma(params.fg_color), luma(params.bg_color));
+    if fg.abs_diff(bg) < MIN_LUMA_GAP {
+        return Some(format!(
+            "The triangle and background colours are too close in brightness to tell apart \
+             ({fg} and {bg} of 255; they need to be at least {MIN_LUMA_GAP} apart)."
+        ));
+    }
+    let decodes = decode_image(png).is_ok_and(|d| d.text.as_deref() == Some(params.payload));
+    match (decodes, params.overlay.is_some()) {
+        (true, _) => None,
+        // The overlay's share is kept within what the level repairs, but what it covers varies.
+        (false, true) => Some(
+            "This code doesn't decode with its overlay. Make the overlay smaller or raise the \
+             error correction."
+                .to_string(),
+        ),
+        (false, false) => Some("This code doesn't decode.".to_string()),
+    }
 }
 
 /// The triangle grid in pixel coordinates, shared by every cell so that neighbouring triangles
@@ -1325,7 +1348,7 @@ fn create_image_from_payload(
         mask_index,
         colour_transitions,
         shared_edges,
-        overlay_decodes: None,
+        decode_warning: None,
     })
 }
 
@@ -1797,6 +1820,8 @@ pub struct DecodeDebug {
     pub annotated_png: Vec<u8>,
     /// Which decode attempt succeeded (or was last tried on failure):
     /// "lattice-fit", "naive", "cluster+pitch", any of them with a " ±5" suffix when found in the neighbourhood, or "all failed".
+    /// A flip, a gentler erosion and a negative image (light triangles on dark) each add a suffix,
+    /// in that order: " (flipped …)", " (erosion N)", " (inverted)".
     pub decode_method: String,
     /// Error-correction level the code was read at; `None` on failure.
     pub ecc_level: Option<EccLevel>,
@@ -1819,24 +1844,60 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
     // Convert to grayscale for processing
     let gray_img = image::DynamicImage::ImageRgba8(img.clone()).to_luma8();
 
+    // Split pixels into triangle and background at the cut-off between the image's two brightness
+    // peaks (Otsu's method), so any two colours far enough apart are read, not only ones on either
+    // side of mid-grey. The fixed mid-grey cut-off stays as a fallback for photos where something
+    // around the code skews the histogram.
+    let otsu = otsu_level(&gray_img);
+    let mut cut_offs = vec![(otsu, false)];
+    if splits_differently(&gray_img, otsu, DARK_LUMA) {
+        cut_offs.push((DARK_LUMA, true));
+    }
+
     // Try the strongest erosion first: it is what default-sized images need, so they decode on the
     // first attempt. Smaller erosions are only tried when that fails.
     let mut first_failure: Option<DecodeAttempt> = None;
     let mut failures: Vec<String> = Vec::new();
-    for radius in EROSION_RADII {
-        match decode_with_erosion(&gray_img, radius) {
-            Ok(mut attempt) if attempt.debug.text.is_some() => {
-                if radius != EROSION_RADII[0] {
-                    attempt.debug.decode_method += &format!(" (erosion {})", radius);
+    for (cut_off, is_fixed) in cut_offs {
+        // Everything downstream reads this black-and-white image (black = triangle).
+        let binary = threshold(&gray_img, cut_off, ThresholdType::Binary);
+        // A negative code (light triangles on a dark background) is read inverted. The margin
+        // around a code is background, so a dark edge suggests trying the negative first; the other
+        // polarity is still tried in case the guess is wrong (a photo with dark surroundings).
+        let inverted = threshold(&gray_img, cut_off, ThresholdType::BinaryInverted);
+        let polarities = if edge_luminance(&binary) < DARK_LUMA as f32 {
+            [(&inverted, true), (&binary, false)]
+        } else {
+            [(&binary, false), (&inverted, true)]
+        };
+        for (gray, is_inverted) in polarities {
+            let attempt_name = format!(
+                "cut-off {}{}",
+                cut_off,
+                if is_inverted { ", inverted" } else { "" }
+            );
+            for radius in EROSION_RADII {
+                match decode_with_erosion(gray, radius) {
+                    Ok(mut attempt) if attempt.debug.text.is_some() => {
+                        if radius != EROSION_RADII[0] {
+                            attempt.debug.decode_method += &format!(" (erosion {})", radius);
+                        }
+                        if is_inverted {
+                            attempt.debug.decode_method += " (inverted)";
+                        }
+                        if is_fixed {
+                            attempt.debug.decode_method += " (fixed cut-off)";
+                        }
+                        return attempt.with_annotation(&img);
+                    }
+                    Ok(attempt) => {
+                        let error = attempt.debug.error.clone().unwrap_or_default();
+                        failures.push(format!("{attempt_name}, erosion {radius}:\n{error}"));
+                        first_failure.get_or_insert(attempt);
+                    }
+                    Err(e) => failures.push(format!("{attempt_name}, erosion {radius}: {e}")),
                 }
-                return attempt.with_annotation(&img);
             }
-            Ok(attempt) => {
-                let error = attempt.debug.error.clone().unwrap_or_default();
-                failures.push(format!("erosion {}:\n{}", radius, error));
-                first_failure.get_or_insert(attempt);
-            }
-            Err(e) => failures.push(format!("erosion {}: {}", radius, e)),
         }
     }
 
@@ -1850,6 +1911,37 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
         None => Err(failures),
     }
 }
+
+/// Mean luminance of the image's outermost pixels. Generated codes have a margin of background
+/// there, so it tells a light background from a dark one.
+fn edge_luminance(img: &GrayImage) -> f32 {
+    let (width, height) = img.dimensions();
+    let edge = img
+        .enumerate_pixels()
+        .filter(|&(x, y, _)| x == 0 || y == 0 || x == width - 1 || y == height - 1);
+    let (sum, count) = edge.fold((0u64, 0u64), |(sum, count), (_, _, p)| {
+        (sum + p[0] as u64, count + 1)
+    });
+    sum as f32 / count.max(1) as f32
+}
+
+/// Mid-grey: the decoder's fallback cut-off between triangle and background. The decoder works on a
+/// black-and-white image, so after the split pixels below this are dark (part of a triangle).
+const DARK_LUMA: u8 = 128;
+
+/// Whether two cut-offs put more than 1% of the pixels on different sides. A rendered code is
+/// almost all pure colour, so any cut-off between its two colours splits it the same way, and
+/// trying a second one would only double the time a failing decode takes.
+fn splits_differently(img: &GrayImage, a: u8, b: u8) -> bool {
+    let (low, high) = (a.min(b), a.max(b));
+    let between = img.pixels().filter(|p| low < p[0] && p[0] <= high).count();
+    between * 100 > img.pixels().len()
+}
+
+/// Least brightness difference between the triangle and background colours a generated code may
+/// have. A clean PNG reads with much less; this leaves room for screens, print and cameras. A guess,
+/// not measured on photos.
+pub const MIN_LUMA_GAP: u8 = 24;
 
 /// Erosion radii (in pixels) tried in order. Erosion peels this many pixels off every black shape
 /// so that touching triangles (Stain style, or bridges left by blur) come apart before the blobs are
@@ -2074,6 +2166,9 @@ fn try_grid_strategies(gray_img: &GrayImage, ctx: &GridContext) -> DecodeDebug {
         Some(fit) => (fit.rows, fit.cols),
         None => cluster_pitch_estimate(ctx),
     };
+    // The estimate of a cropped or badly damaged image can fall under 2×2, which no grid is (the
+    // grid search skips those too).
+    let (rows, cols) = (rows.max(2), cols.max(2));
     let lattice = ctx.lattice_for(rows, cols);
     let bit_count =
         pack_data_bits(&sample_cells(gray_img, rows, cols, &lattice), FLIPS[0]).bit_count;
@@ -2590,7 +2685,9 @@ fn find_triangles(img: &GrayImage, erosion: u8) -> Result<Vec<Triangle>, String>
     }
 
     // Apply binary threshold to separate black and white regions
-    let binary = threshold(img, 128, ThresholdType::Binary);
+    // The image is already black and white (see `decode_image`); this only makes it binary for
+    // images passed in directly by tests.
+    let binary = threshold(img, DARK_LUMA, ThresholdType::Binary);
 
     // Erode the black regions to separate touching triangles. imageproc treats non-zero (white)
     // pixels as the foreground, so growing the white background by `erosion` erodes the black.
@@ -3057,7 +3154,7 @@ fn find_anchors(triangles: &[Triangle]) -> Option<Anchors> {
     })
 }
 
-/// Fraction of the pixels in a small square around (cx, cy) that are dark (< 128).
+/// Fraction of the pixels in a small square around (cx, cy) that are dark (< [`DARK_LUMA`]).
 fn sample_region_darkness(img: &GrayImage, cx: f32, cy: f32, radius: u32) -> f32 {
     let r = radius as i32;
     let x0 = (cx as i32 - r).max(0) as u32;
@@ -3069,7 +3166,7 @@ fn sample_region_darkness(img: &GrayImage, cx: f32, cy: f32, radius: u32) -> f32
     let mut total = 0u32;
     for y in y0..=y1 {
         for x in x0..=x1 {
-            if img.get_pixel(x, y)[0] < 128 {
+            if img.get_pixel(x, y)[0] < DARK_LUMA {
                 dark += 1;
             }
             total += 1;
@@ -3584,6 +3681,172 @@ mod tests {
         assert_fixtures_decode_flipped(true, true, "flipped both ways");
     }
 
+    /// Swaps black and white, as a code drawn in light colours on a dark background would be.
+    fn invert(png: &[u8]) -> Vec<u8> {
+        let mut img = image::load_from_memory(png)
+            .expect("load failed")
+            .to_luma8();
+        image::imageops::invert(&mut img);
+        let mut out = Vec::new();
+        PngEncoder::new(&mut out)
+            .write_image(
+                img.as_raw(),
+                img.width(),
+                img.height(),
+                ExtendedColorType::L8,
+            )
+            .expect("encode failed");
+        out
+    }
+
+    #[test]
+    fn decodes_inverted_fixtures() {
+        for entry in std::fs::read_dir(FIXTURES_DIR).expect("fixtures dir missing") {
+            let name = entry.expect("read fixtures dir").file_name();
+            let name = name.to_string_lossy();
+            let Some((len, truth)) = parse_fixture_name(&name) else {
+                continue;
+            };
+            let png = std::fs::read(format!("{FIXTURES_DIR}/{name}")).expect("read fixture");
+            let decoded = decode_image(&invert(&png)).expect("decode errored");
+            assert_eq!(
+                (decoded.row_count, decoded.column_count),
+                truth,
+                "{name} inverted: wrong grid"
+            );
+            assert_eq!(
+                decoded.text.as_deref(),
+                Some(payload(len).as_str()),
+                "{name} inverted: wrong text"
+            );
+            assert_eq!(
+                decoded.decode_method, "lattice-fit (inverted)",
+                "{name} inverted: wrong method"
+            );
+        }
+    }
+
+    #[test]
+    fn warns_when_the_code_does_not_read_back() {
+        let generate_in = |fg_color, bg_color| {
+            generate_image_debug(GenerateImageParams {
+                payload: &payload(40),
+                payload_type: "text",
+                width_ratio: 1,
+                height_ratio: 1,
+                style: ImageStyle::Tiles,
+                fg_color,
+                bg_color,
+                horizon_seed: 42,
+                mask: None,
+                triangle_width: DEFAULT_TRIANGLE_WIDTH,
+                ecc_level: DEFAULT_ECC_LEVEL,
+                overlay: None,
+            })
+            .expect("generation failed")
+        };
+        // Both light, both dark, and light on dark: far enough apart, so they all read.
+        for (fg, bg) in [
+            (0xFF90ADD3, 0xFFC0CAD7),
+            (0xFF1B2A41, 0xFF5A6A80),
+            (0xFFC0CAD7, 0xFF1E2A33),
+        ] {
+            let generated = generate_in(fg, bg);
+            assert_eq!(generated.decode_warning, None, "{fg:08X} on {bg:08X}");
+        }
+        let warning = generate_in(0xFFB4BECB, 0xFFC0CAD7).decode_warning;
+        assert!(
+            warning
+                .as_deref()
+                .is_some_and(|w| w.contains("too close in brightness")),
+            "{warning:?}"
+        );
+    }
+
+    /// Two light colours (as the Zero Dawn preset uses) are split by Otsu's cut-off at once; the
+    /// fixed mid-grey one would see no triangles at all.
+    #[test]
+    fn decodes_two_light_colours_without_a_fallback() {
+        for style in STYLES {
+            let generated = generate_image_debug(GenerateImageParams {
+                payload: &payload(40),
+                payload_type: "text",
+                width_ratio: 1,
+                height_ratio: 1,
+                style,
+                fg_color: 0xFF90ADD3,
+                bg_color: 0xFFC0CAD7,
+                horizon_seed: 42,
+                mask: None,
+                triangle_width: DEFAULT_TRIANGLE_WIDTH,
+                ecc_level: DEFAULT_ECC_LEVEL,
+                overlay: None,
+            })
+            .expect("generation failed");
+            let decoded = decode_image(&generated.png_bytes).expect("decode errored");
+            assert_eq!(
+                decoded.text.as_deref(),
+                Some(payload(40).as_str()),
+                "{style:?}"
+            );
+            assert_eq!(decoded.decode_method, "lattice-fit", "{style:?}");
+        }
+    }
+
+    /// A partial code (a photo that cut most of it off) estimates a grid under 2×2, which used to
+    /// overflow when the failure was reported.
+    #[test]
+    fn fails_cleanly_on_a_partial_code() {
+        let code = generate(ImageStyle::Tiles, (1, 1), 40);
+        let full = image::load_from_memory(&code.png_bytes)
+            .expect("load failed")
+            .to_luma8();
+        let (w, h) = full.dimensions();
+        for (x, y, width, height) in [(0, 0, w / 3, h / 3), (0, 0, w / 8, h)] {
+            let part = image::imageops::crop_imm(&full, x, y, width, height).to_image();
+            let mut png = Vec::new();
+            PngEncoder::new(&mut png)
+                .write_image(part.as_raw(), width, height, ExtendedColorType::L8)
+                .expect("encode failed");
+            if let Ok(decoded) = decode_image(&png) {
+                assert_eq!(decoded.text, None, "{width}×{height} decoded");
+            }
+        }
+    }
+
+    /// A code generated with light triangles on a dark background, in colour, and flipped.
+    #[test]
+    fn decodes_a_negative_colour_code_flipped() {
+        for style in STYLES {
+            let generated = generate_image_debug(GenerateImageParams {
+                payload: &payload(40),
+                payload_type: "text",
+                width_ratio: 1,
+                height_ratio: 1,
+                style,
+                fg_color: 0xFFFFE680,
+                bg_color: 0xFF102040,
+                horizon_seed: 42,
+                mask: None,
+                triangle_width: DEFAULT_TRIANGLE_WIDTH,
+                ecc_level: DEFAULT_ECC_LEVEL,
+                overlay: None,
+            })
+            .expect("generation failed");
+            let decoded =
+                decode_image(&flip(&generated.png_bytes, true, false)).expect("decode errored");
+            assert_eq!(
+                decoded.text.as_deref(),
+                Some(payload(40).as_str()),
+                "{style:?}: wrong text"
+            );
+            assert_eq!(
+                decoded.decode_method, "lattice-fit (flipped horizontally) (inverted)",
+                "{style:?}: wrong method"
+            );
+        }
+    }
+
     /// Codes holding bare UTF-8 instead of a payload envelope must decode in every orientation,
     /// so telling the right reading apart can't rely on the envelope.
     #[test]
@@ -3833,7 +4096,7 @@ mod tests {
                     };
                     let generated =
                         generate_with_overlay(style, level, overlay).expect("generation failed");
-                    assert_eq!(generated.overlay_decodes, Some(true), "{style:?} {level:?}");
+                    assert_eq!(generated.decode_warning, None, "{style:?} {level:?}");
                 }
             }
         }
