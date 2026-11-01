@@ -184,6 +184,28 @@ impl ImageStyle {
     }
 }
 
+/// A grid cell as `(row, col)`.
+type Cell = (usize, usize);
+
+/// A Horizon lane: its direction and index within that family.
+type LaneId = (LaneDirection, isize);
+
+/// The two families of diagonal lanes Horizon waterfalls run along.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum LaneDirection {
+    East,
+    West,
+}
+
+impl LaneDirection {
+    fn opposite(self) -> Self {
+        match self {
+            Self::East => Self::West,
+            Self::West => Self::East,
+        }
+    }
+}
+
 /// Per-triangle group assignment for the [`ImageStyle::Horizon`] style.
 ///
 /// Connected regions of foreground (bit=1) triangles are flood-filled into
@@ -294,47 +316,49 @@ impl HorizonLayout {
         // (some members were taken by earlier, larger groups) so we split it
         // again by adjacency with a second BFS pass.
 
-        let mut groups: Vec<Vec<(usize, usize)>> = Vec::new();
+        // Each cell lies on one lane of each family: a diagonal running down to
+        // the east, and one running down to the west.
+        let lane = |direction: LaneDirection, (r, c): (usize, usize)| -> isize {
+            let row_coef = (r / 2) * 2;
+            match direction {
+                LaneDirection::East => {
+                    let col_coef = if r % 2 == 0 { (c + 1) & !1 } else { c & !1 };
+                    (r * 2 - row_coef + col_coef) as isize
+                }
+                LaneDirection::West => {
+                    let col_coef = if r % 2 == 1 { (c + 1) & !1 } else { c & !1 };
+                    col_coef as isize - (r as isize * 2 - row_coef as isize)
+                }
+            }
+        };
+
+        // Waterfalls: the direction and lane each group was cut from, and its cells.
+        let mut groups: Vec<(LaneId, Vec<Cell>)> = Vec::new();
 
         for bfs_group in &bfs_groups {
-            // Build lane buckets for both families
-            let mut eastern_lanes: std::collections::HashMap<usize, Vec<(usize, usize)>> =
-                std::collections::HashMap::new();
-            let mut western_lanes: std::collections::HashMap<isize, Vec<(usize, usize)>> =
-                std::collections::HashMap::new();
-
-            for &(r, c) in bfs_group {
-                let col_coef_eastern = match r {
-                    x if x % 2 == 0 => (c + 1) & !1,
-                    _ => c & !1,
-                };
-                let col_coef_western = match r {
-                    x if x % 2 == 1 => (c + 1) & !1,
-                    _ => c & !1,
-                };
-                let row_coef = (r / 2) * 2;
-
-                let eastern_lane = r * 2 - row_coef + col_coef_eastern;
-                let western_lane = col_coef_western as isize - (r as isize * 2 - row_coef as isize);
-
-                eastern_lanes.entry(eastern_lane).or_default().push((r, c));
-                western_lanes.entry(western_lane).or_default().push((r, c));
+            // Lane buckets for both families. Ordered maps, so equal-sized lanes
+            // claim cells in the same order on every run.
+            let mut lanes: std::collections::BTreeMap<LaneId, Vec<Cell>> =
+                std::collections::BTreeMap::new();
+            for &cell in bfs_group {
+                for direction in [LaneDirection::East, LaneDirection::West] {
+                    lanes
+                        .entry((direction, lane(direction, cell)))
+                        .or_default()
+                        .push(cell);
+                }
             }
 
-            // Collect all candidate lane-groups, tag with size for sorting
-            let mut candidates: Vec<Vec<(usize, usize)>> = eastern_lanes
-                .into_values()
-                .chain(western_lanes.into_values())
-                .collect();
-
-            // Largest first so big groups claim members before small ones
-            candidates.sort_unstable_by_key(|b| std::cmp::Reverse(b.len()));
+            // Largest first so big groups claim members before small ones; the
+            // sort is stable, so ties keep the lanes' order.
+            let mut candidates: Vec<(LaneId, Vec<Cell>)> = lanes.into_iter().collect();
+            candidates.sort_by_key(|(_, cells)| std::cmp::Reverse(cells.len()));
 
             // Claim members greedily; track which cells are already taken
             let mut taken = vec![vec![false; cols as usize]; rows as usize];
-            let mut claimed: Vec<Vec<(usize, usize)>> = Vec::new();
+            let mut claimed: Vec<(LaneId, Vec<Cell>)> = Vec::new();
 
-            for candidate in candidates {
+            for (lane_id, candidate) in candidates {
                 let free: Vec<(usize, usize)> = candidate
                     .into_iter()
                     .filter(|&(r, c)| !taken[r][c])
@@ -345,12 +369,12 @@ impl HorizonLayout {
                 for &(r, c) in &free {
                     taken[r][c] = true;
                 }
-                claimed.push(free);
+                claimed.push((lane_id, free));
             }
 
             // Split each claimed sub-group by adjacency with a second BFS pass.
             // After greedy claiming, a sub-group may be internally disconnected.
-            for sub_group in claimed {
+            for (lane_id, sub_group) in claimed {
                 // Build a set for fast lookup
                 let member_set: std::collections::HashSet<(usize, usize)> =
                     sub_group.iter().copied().collect();
@@ -375,10 +399,70 @@ impl HorizonLayout {
                             }
                         }
                     }
-                    groups.push(component);
+                    groups.push((lane_id, component));
                 }
             }
         }
+
+        // --- Step 3.75: chain east and west waterfalls that meet end to end ---
+        //
+        // Waterfall A and B are joined when they run in opposite directions and
+        // an end cell of A lies on B's lane right next to an end of B: it would
+        // have continued B had A not claimed it. Joins chain, so a zigzag of
+        // waterfalls becomes one group.
+        let group_of: std::collections::HashMap<(usize, usize), usize> = groups
+            .iter()
+            .enumerate()
+            .flat_map(|(index, (_, cells))| cells.iter().map(move |&cell| (cell, index)))
+            .collect();
+        // An end has at most one neighbour in its own group (waterfalls are paths).
+        let is_end = |group: usize, (r, c): (usize, usize)| {
+            neighbours(r, c)
+                .into_iter()
+                .filter(|cell| group_of.get(cell) == Some(&group))
+                .count()
+                <= 1
+        };
+        let mut parent: Vec<usize> = (0..groups.len()).collect();
+        fn root(parent: &mut [usize], mut i: usize) -> usize {
+            while parent[i] != i {
+                parent[i] = parent[parent[i]];
+                i = parent[i];
+            }
+            i
+        }
+        for (a, ((direction_a, _), cells_a)) in groups.iter().enumerate() {
+            if cells_a.len() < 2 {
+                continue;
+            }
+            let other = direction_a.opposite();
+            for &end in cells_a.iter().filter(|&&cell| is_end(a, cell)) {
+                for next in neighbours(end.0, end.1) {
+                    let Some(&b) = group_of.get(&next) else {
+                        continue;
+                    };
+                    let ((direction_b, lane_b), cells_b) = &groups[b];
+                    if b != a
+                        && *direction_b == other
+                        && cells_b.len() >= 2
+                        && *lane_b == lane(other, end)
+                        && is_end(b, next)
+                    {
+                        let (root_a, root_b) = (root(&mut parent, a), root(&mut parent, b));
+                        parent[root_a] = root_b;
+                    }
+                }
+            }
+        }
+        let mut chained: std::collections::BTreeMap<usize, Vec<(usize, usize)>> =
+            std::collections::BTreeMap::new();
+        for (index, (_, cells)) in groups.into_iter().enumerate() {
+            chained
+                .entry(root(&mut parent, index))
+                .or_default()
+                .extend(cells);
+        }
+        let groups: Vec<Vec<(usize, usize)>> = chained.into_values().collect();
 
         // --- Step 4: assign group IDs, skip singletons ---
         let mut group_id: Vec<Vec<Option<usize>>> = vec![vec![None; cols as usize]; rows as usize];
