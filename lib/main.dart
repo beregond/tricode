@@ -1258,59 +1258,68 @@ class _MyHomePageState extends State<MyHomePage>
                       ),
                       const SizedBox(height: 16),
                     ],
-                    if (_selectedStyle == 2) ...[
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: TextField(
-                                controller: _horizonSeedController,
-                                keyboardType: TextInputType.number,
-                                decoration: const InputDecoration(
-                                  labelText: 'Horizon seed',
-                                  hintText: 'Leave empty for current time',
-                                  border: OutlineInputBorder(),
-                                ),
-                                onChanged: (_) {
-                                  _seedDebounce?.cancel();
-                                  _seedDebounce = Timer(
-                                    const Duration(milliseconds: 500),
-                                    () {
-                                      if (_textController.text
-                                          .trim()
-                                          .isNotEmpty) {
-                                        _sendTextToRust();
-                                      }
-                                    },
-                                  );
-                                },
+                    // Always shown so the options don't jump around; only the
+                    // Horizon style uses a seed, so it's disabled for the others.
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: _horizonSeedController,
+                              enabled: _selectedStyle == 2,
+                              keyboardType: TextInputType.number,
+                              decoration: InputDecoration(
+                                labelText: 'Horizon seed',
+                                hintText: 'Leave empty for current time',
+                                helperText: _selectedStyle == 2
+                                    ? null
+                                    : 'Only used by the Horizon style',
+                                border: const OutlineInputBorder(),
                               ),
-                            ),
-                            const SizedBox(width: 8),
-                            IconButton(
-                              tooltip: 'Randomize seed',
-                              icon: const Icon(Icons.shuffle),
-                              onPressed: () {
-                                final rng = Random();
-                                // nextInt max is 2^32, so build 10 digits from two calls.
-                                // High part: 1–9, low part: 0–999999999 (9 digits zero-padded).
-                                final high = 1 + rng.nextInt(9);
-                                final low = rng.nextInt(1000000000);
-                                final seed = high * 1000000000 + low;
-                                setState(() {
-                                  _horizonSeedController.text = seed.toString();
-                                });
-                                if (_textController.text.trim().isNotEmpty) {
-                                  _sendTextToRust();
-                                }
+                              onChanged: (_) {
+                                _seedDebounce?.cancel();
+                                _seedDebounce = Timer(
+                                  const Duration(milliseconds: 500),
+                                  () {
+                                    if (_textController.text
+                                        .trim()
+                                        .isNotEmpty) {
+                                      _sendTextToRust();
+                                    }
+                                  },
+                                );
                               },
                             ),
-                          ],
-                        ),
+                          ),
+                          const SizedBox(width: 8),
+                          IconButton(
+                            tooltip: 'Randomize seed',
+                            icon: const Icon(Icons.shuffle),
+                            onPressed: _selectedStyle != 2
+                                ? null
+                                : () {
+                                    final rng = Random();
+                                    // nextInt max is 2^32, so build 10 digits from two calls.
+                                    // High part: 1–9, low part: 0–999999999 (9 digits zero-padded).
+                                    final high = 1 + rng.nextInt(9);
+                                    final low = rng.nextInt(1000000000);
+                                    final seed = high * 1000000000 + low;
+                                    setState(() {
+                                      _horizonSeedController.text = seed
+                                          .toString();
+                                    });
+                                    if (_textController.text
+                                        .trim()
+                                        .isNotEmpty) {
+                                      _sendTextToRust();
+                                    }
+                                  },
+                          ),
+                        ],
                       ),
-                      const SizedBox(height: 16),
-                    ],
+                    ),
+                    const SizedBox(height: 16),
                   ],
                   ElevatedButton(
                     onPressed: _textController.text.trim().isEmpty
