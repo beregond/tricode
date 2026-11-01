@@ -4,10 +4,11 @@ library;
 
 import 'dart:async';
 import 'dart:math';
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:super_clipboard/super_clipboard.dart';
 
 /// Largest share of the code's area an overlay may take at each error
@@ -46,24 +47,107 @@ Future<Uint8List> imageToOverlayPng(Uint8List bytes) async {
   }
 }
 
-/// Renders [text] (centred, one or more lines) in [color] on a transparent
+/// A font offered for text overlays: one of [overlayFonts], or one installed
+/// on the computer.
+@immutable
+class OverlayFont {
+  const OverlayFont(this.name, this.family, {this.variableWeight = false});
+
+  /// An installed font, drawn by asking the system for [family].
+  const OverlayFont.installed(String family) : this(family, family);
+
+  /// Shown in the font picker.
+  final String name;
+
+  /// Family registered in pubspec.yaml; null for the platform's own font.
+  final String? family;
+
+  /// Whether the font file covers every weight (a variable font), so bold is
+  /// drawn with the font's real bold rather than a synthesised one.
+  final bool variableWeight;
+
+  @override
+  bool operator ==(Object other) =>
+      other is OverlayFont && other.name == name && other.family == family;
+
+  @override
+  int get hashCode => Object.hash(name, family);
+}
+
+/// The platform's own font, used when no other is chosen.
+const platformFont = OverlayFont('System', null);
+
+/// Fonts offered for text overlays; all but the first are bundled in
+/// assets/fonts so the text looks the same on every platform.
+const overlayFonts = [
+  platformFont,
+  OverlayFont('Serif', 'Lora', variableWeight: true),
+  OverlayFont('Mono', 'JetBrainsMono', variableWeight: true),
+  OverlayFont('Display', 'BebasNeue'),
+  OverlayFont('Script', 'Pacifico'),
+  OverlayFont('Handwriting', 'Caveat', variableWeight: true),
+];
+
+/// How text overlays are drawn.
+@immutable
+class OverlayTextStyle {
+  const OverlayTextStyle({
+    required this.color,
+    this.font = platformFont,
+    this.bold = true,
+    this.italic = false,
+    this.outline = false,
+  });
+
+  final Color color;
+
+  final OverlayFont font;
+  final bool bold;
+  final bool italic;
+
+  /// Draw only the letters' outlines instead of filling them.
+  final bool outline;
+
+  /// The Flutter text style for drawing at [fontSize], also used to preview
+  /// fonts in the picker.
+  TextStyle toTextStyle(double fontSize) {
+    final weight = bold ? FontWeight.w700 : FontWeight.w400;
+    return TextStyle(
+      fontFamily: font.family,
+      fontSize: fontSize,
+      fontWeight: weight,
+      fontVariations: font.variableWeight
+          ? [FontVariation.weight(weight.value.toDouble())]
+          : null,
+      fontStyle: italic ? FontStyle.italic : FontStyle.normal,
+      height: 1.1,
+      // An outline replaces the fill colour with a stroke in that colour.
+      color: outline ? null : color,
+      foreground: outline
+          ? (Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = fontSize * _outlineWidth
+              ..strokeJoin = StrokeJoin.round
+              ..color = color)
+          : null,
+    );
+  }
+}
+
+/// Outline stroke width as a share of the font size.
+const _outlineWidth = 0.05;
+
+/// Renders [text] (centred, one or more lines) in [style] on a transparent
 /// background, as PNG bytes.
-Future<Uint8List> textToOverlayPng(String text, Color color) async {
+Future<Uint8List> textToOverlayPng(String text, OverlayTextStyle style) async {
   final painter = TextPainter(
-    text: TextSpan(
-      text: text,
-      style: TextStyle(
-        color: color,
-        fontSize: _overlayFontSize,
-        fontWeight: FontWeight.bold,
-        height: 1.1,
-      ),
-    ),
+    text: TextSpan(text: text, style: style.toTextStyle(_overlayFontSize)),
     textAlign: TextAlign.center,
     textDirection: TextDirection.ltr,
   )..layout();
-  // A little room around the glyphs so descenders and overhangs aren't cut.
-  const padding = _overlayFontSize * 0.1;
+  // Generous room around the layout box, since slanted and script glyphs and
+  // the outline stroke reach past it; the result is cropped to the ink.
+  const padding = _overlayFontSize * 0.5;
   final width = (painter.width + 2 * padding).ceil();
   final height = (painter.height + 2 * padding).ceil();
   final recorder = ui.PictureRecorder();
@@ -72,11 +156,68 @@ Future<Uint8List> textToOverlayPng(String text, Color color) async {
   final picture = recorder.endRecording();
   final image = await picture.toImage(width, height);
   try {
-    return await _encodePng(image);
+    final ink = await _inkBounds(image);
+    if (ink == null) return await _encodePng(image);
+    // Keep a sliver of margin so anti-aliased edges aren't clipped.
+    final crop = ink
+        .inflate(2)
+        .intersect(Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()));
+    final cropRecorder = ui.PictureRecorder();
+    Canvas(
+      cropRecorder,
+    ).drawImageRect(image, crop, Offset.zero & crop.size, Paint());
+    final cropPicture = cropRecorder.endRecording();
+    final cropped = await cropPicture.toImage(
+      crop.width.round(),
+      crop.height.round(),
+    );
+    try {
+      return await _encodePng(cropped);
+    } finally {
+      cropped.dispose();
+      cropPicture.dispose();
+    }
   } finally {
     image.dispose();
     picture.dispose();
   }
+}
+
+/// The smallest rectangle holding every visible pixel of [image], or null
+/// when it is fully transparent.
+Future<Rect?> _inkBounds(ui.Image image) async {
+  final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+  if (data == null) return null;
+  var (left, top, right, bottom) = (image.width, image.height, -1, -1);
+  for (var y = 0; y < image.height; y++) {
+    for (var x = 0; x < image.width; x++) {
+      if (data.getUint8((y * image.width + x) * 4 + 3) == 0) continue;
+      left = min(left, x);
+      right = max(right, x);
+      top = min(top, y);
+      bottom = max(bottom, y);
+    }
+  }
+  if (right < 0) return null;
+  return Rect.fromLTRB(
+    left.toDouble(),
+    top.toDouble(),
+    right + 1.0,
+    bottom + 1.0,
+  );
+}
+
+/// Adds the bundled fonts' licences to the app's licence page.
+void registerOverlayFontLicenses() {
+  LicenseRegistry.addLicense(() async* {
+    for (final font in overlayFonts) {
+      final family = font.family;
+      if (family == null) continue;
+      yield LicenseEntryWithLineBreaks([
+        family,
+      ], await rootBundle.loadString('assets/fonts/$family/OFL.txt'));
+    }
+  });
 }
 
 Future<Uint8List> _encodePng(ui.Image image) async {

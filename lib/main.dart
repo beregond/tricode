@@ -15,6 +15,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:super_clipboard/super_clipboard.dart';
 
 import 'overlay.dart';
+import 'system_fonts.dart';
 import 'src/bindings/bindings.dart';
 
 /// Data masks the generator can XOR the payload with, in the same order as
@@ -106,6 +107,7 @@ String? _triangleWidthError(String text) {
 
 Future<void> main() async {
   await initializeRust(assignRustSignal);
+  registerOverlayFontLicenses();
   runApp(const MyApp());
 }
 
@@ -196,6 +198,21 @@ class _MyHomePageState extends State<MyHomePage>
   final TextEditingController _overlayTextController = TextEditingController();
   Timer? _overlayTextDebounce;
   Uint8List? _overlayImage; // PNG, already scaled down by imageToOverlayPng
+  OverlayFont _overlayFont = platformFont;
+  // Installed font families, listed the first time the picker opens.
+  Future<List<String>>? _installedFonts;
+  bool _overlayBold = true;
+  bool _overlayItalic = false;
+  bool _overlayOutline = false;
+  Color? _overlayTextColor; // null = the triangle colour
+
+  OverlayTextStyle get _overlayTextStyle => OverlayTextStyle(
+    color: (_overlayTextColor ?? _fgColor).withAlpha(255),
+    font: _overlayFont,
+    bold: _overlayBold,
+    italic: _overlayItalic,
+    outline: _overlayOutline,
+  );
   // Overlay size as a fraction of the largest the error correction level allows,
   // so changing the level keeps the overlay's relative size.
   double _overlaySize = 1.0;
@@ -259,6 +276,11 @@ class _MyHomePageState extends State<MyHomePage>
           _overlayTextController.clear();
           _overlayImage = null;
           _overlaySize = 1.0;
+          _overlayFont = platformFont;
+          _overlayBold = true;
+          _overlayItalic = false;
+          _overlayOutline = false;
+          _overlayTextColor = null;
         });
       }
     });
@@ -346,7 +368,7 @@ class _MyHomePageState extends State<MyHomePage>
       case _OverlayMode.text:
         final text = _overlayTextController.text.trim();
         if (text.isEmpty) return Uint8List(0);
-        return textToOverlayPng(text, _fgColor.withAlpha(255));
+        return textToOverlayPng(text, _overlayTextStyle);
       case _OverlayMode.image:
         return _overlayImage ?? Uint8List(0);
     }
@@ -1615,6 +1637,109 @@ class _MyHomePageState extends State<MyHomePage>
     super.dispose();
   }
 
+  /// Font, style and colour of a text overlay.
+  Widget _buildOverlayTextStyleOptions(BuildContext context) {
+    void update(VoidCallback change) {
+      setState(change);
+      _regenerate();
+    }
+
+    return Column(
+      children: [
+        InputDecorator(
+          decoration: const InputDecoration(
+            labelText: 'Font',
+            border: OutlineInputBorder(),
+            contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          ),
+          child: DropdownButtonHideUnderline(
+            // null = "Installed fonts…", which opens a picker.
+            child: DropdownButton<OverlayFont?>(
+              value: _overlayFont,
+              isExpanded: true,
+              items: [
+                for (final font in [
+                  ...overlayFonts,
+                  // An installed font picked earlier.
+                  if (!overlayFonts.contains(_overlayFont)) _overlayFont,
+                ])
+                  DropdownMenuItem(
+                    value: font,
+                    // Each name previewed in its own font.
+                    child: Text(
+                      font.name,
+                      overflow: TextOverflow.ellipsis,
+                      style: OverlayTextStyle(
+                        color: Theme.of(context).colorScheme.onSurface,
+                        font: font,
+                        bold: false,
+                      ).toTextStyle(16),
+                    ),
+                  ),
+                if (canListInstalledFonts)
+                  const DropdownMenuItem(
+                    value: null,
+                    child: Text('Installed fonts…'),
+                  ),
+              ],
+              onChanged: (font) async {
+                if (font != null) {
+                  update(() => _overlayFont = font);
+                  return;
+                }
+                final family = await showDialog<String>(
+                  context: context,
+                  builder: (_) => _InstalledFontPicker(
+                    families: _installedFonts ??= installedFontFamilies(),
+                  ),
+                );
+                if (family != null) {
+                  update(() => _overlayFont = OverlayFont.installed(family));
+                }
+              },
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          alignment: WrapAlignment.center,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            FilterChip(
+              label: const Text('Bold'),
+              selected: _overlayBold,
+              onSelected: (on) => update(() => _overlayBold = on),
+            ),
+            FilterChip(
+              label: const Text('Italic'),
+              selected: _overlayItalic,
+              onSelected: (on) => update(() => _overlayItalic = on),
+            ),
+            FilterChip(
+              label: const Text('Outline'),
+              selected: _overlayOutline,
+              onSelected: (on) => update(() => _overlayOutline = on),
+            ),
+            const SizedBox(width: 8),
+            _ColorSwatch(
+              label: 'Text',
+              color: _overlayTextStyle.color,
+              showAlpha: false,
+              onChanged: (c) => update(() => _overlayTextColor = c),
+            ),
+            if (_overlayTextColor != null)
+              TextButton(
+                onPressed: () => update(() => _overlayTextColor = null),
+                child: const Text('Match triangles'),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+
   /// The overlay drawn over the centre of the code: none, a line of text or an
   /// image, and how much of the code it covers.
   Widget _buildOverlayOptions(BuildContext context) {
@@ -1648,7 +1773,6 @@ class _MyHomePageState extends State<MyHomePage>
                 maxLines: 3,
                 decoration: const InputDecoration(
                   labelText: 'Overlay text',
-                  helperText: 'Drawn in the triangle colour',
                   border: OutlineInputBorder(),
                 ),
                 onChanged: (_) {
@@ -1659,6 +1783,8 @@ class _MyHomePageState extends State<MyHomePage>
                   );
                 },
               ),
+              const SizedBox(height: 12),
+              _buildOverlayTextStyleOptions(context),
             ],
             if (_overlayMode == _OverlayMode.image) ...[
               const SizedBox(height: 12),
@@ -1750,6 +1876,96 @@ class _MyHomePageState extends State<MyHomePage>
 
 /// What is drawn over the centre of a generated code.
 enum _OverlayMode { none, text, image }
+
+/// A searchable list of the installed font families, each previewed in its own
+/// font; pops with the chosen family.
+class _InstalledFontPicker extends StatefulWidget {
+  const _InstalledFontPicker({required this.families});
+
+  final Future<List<String>> families;
+
+  @override
+  State<_InstalledFontPicker> createState() => _InstalledFontPickerState();
+}
+
+class _InstalledFontPickerState extends State<_InstalledFontPicker> {
+  String _filter = '';
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Installed fonts'),
+      content: SizedBox(
+        width: 420,
+        height: 480,
+        child: FutureBuilder<List<String>>(
+          future: widget.families,
+          builder: (context, snapshot) {
+            if (snapshot.hasError) {
+              return Center(
+                child: Text('Could not list the fonts: ${snapshot.error}'),
+              );
+            }
+            final families = snapshot.data;
+            if (families == null) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            final query = _filter.toLowerCase();
+            final shown = [
+              for (final family in families)
+                if (family.toLowerCase().contains(query)) family,
+            ];
+            return Column(
+              children: [
+                TextField(
+                  autofocus: true,
+                  decoration: InputDecoration(
+                    prefixIcon: const Icon(Icons.search),
+                    hintText: 'Search ${families.length} fonts',
+                    border: const OutlineInputBorder(),
+                  ),
+                  onChanged: (text) => setState(() => _filter = text),
+                ),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: shown.isEmpty
+                      ? const Center(child: Text('No matching fonts'))
+                      : ListView.builder(
+                          itemCount: shown.length,
+                          itemBuilder: (context, index) {
+                            final family = shown[index];
+                            return ListTile(
+                              dense: true,
+                              // The name in the app's font stays readable even
+                              // for symbol fonts; the sample shows the font.
+                              title: Text(family),
+                              subtitle: Text(
+                                'Tricode 123',
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontFamily: family,
+                                  fontSize: 20,
+                                ),
+                              ),
+                              onTap: () => Navigator.of(context).pop(family),
+                            );
+                          },
+                        ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+      ],
+    );
+  }
+}
 
 class _ColorSwatch extends StatelessWidget {
   const _ColorSwatch({

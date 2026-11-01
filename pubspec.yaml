@@ -95,3 +95,31 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
+
+  # Licences of the bundled overlay fonts, registered with LicenseRegistry.
+  assets:
+    - assets/fonts/BebasNeue/OFL.txt
+    - assets/fonts/Caveat/OFL.txt
+    - assets/fonts/JetBrainsMono/OFL.txt
+    - assets/fonts/Lora/OFL.txt
+    - assets/fonts/Pacifico/OFL.txt
+
+  # Fonts for text overlays (lib/overlay.dart), bundled so the text looks the
+  # same on every platform. All are SIL Open Font License; the variable ones
+  # cover every weight from one file.
+  fonts:
+    - family: BebasNeue
+      fonts:
+        - asset: assets/fonts/BebasNeue/BebasNeue-Regular.ttf
+    - family: Caveat
+      fonts:
+        - asset: assets/fonts/Caveat/Caveat-Variable.ttf
+    - family: JetBrainsMono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono/JetBrainsMono-Variable.ttf
+    - family: Lora
+      fonts:
+        - asset: assets/fonts/Lora/Lora-Variable.ttf
+    - family: Pacifico
+      fonts:
+        - asset: assets/fonts/Pacifico/Pacifico-Regular.ttf
