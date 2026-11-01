@@ -184,11 +184,58 @@ impl ImageStyle {
     }
 }
 
+/// Chance, in percent, that a foreground cell may join a Horizon group.
+const HORIZON_GROUP_PERCENT: u64 = 90;
+
+/// Horizon waterfalls may be cut at every this many grid rows (before chaining).
+const HORIZON_BAND_ROWS: usize = 3;
+
+/// Chance, as (numerator, denominator), that a waterfall is cut where it
+/// crosses a band boundary; otherwise it runs on into the next band.
+const HORIZON_BAND_CUT_CHANCE: (u64, u64) = (2, 3);
+
+/// Splits `cells` into groups connected through `neighbours`.
+fn connected_components(
+    cells: &[Cell],
+    neighbours: &impl Fn(usize, usize) -> Vec<Cell>,
+) -> Vec<Vec<Cell>> {
+    let members: HashSet<Cell> = cells.iter().copied().collect();
+    let mut visited: HashSet<Cell> = HashSet::new();
+    let mut components = Vec::new();
+    for &start in cells {
+        if !visited.insert(start) {
+            continue;
+        }
+        let mut component = Vec::new();
+        let mut queue = std::collections::VecDeque::from([start]);
+        while let Some((r, c)) = queue.pop_front() {
+            component.push((r, c));
+            for next in neighbours(r, c) {
+                if members.contains(&next) && visited.insert(next) {
+                    queue.push_back(next);
+                }
+            }
+        }
+        components.push(component);
+    }
+    components
+}
+
 /// A grid cell as `(row, col)`.
 type Cell = (usize, usize);
 
 /// A Horizon lane: its direction and index within that family.
 type LaneId = (LaneDirection, isize);
+
+/// Which way a chain of Horizon waterfalls runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChainKind {
+    /// Bottom end to top end: a zigzag running down the image.
+    Down,
+    /// Bottom to bottom or top to top (an east end to a west end): a zigzag
+    /// running sideways.
+    Sideways,
+}
 
 /// The two families of diagonal lanes Horizon waterfalls run along.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -245,15 +292,15 @@ impl HorizonLayout {
         let is_fg = layout_cells(encoded_data, rows, cols);
 
         // --- Step 2: select which foreground cells are "candidates" ---
-        // Use the low 2 bits of the hash: candidate unless both bits are set,
-        // giving a 75% selection rate so groups form more readily.
+        // Each foreground cell becomes a candidate with HORIZON_GROUP_PERCENT %
+        // probability, so most can form groups.
         let mut candidate = vec![vec![false; cols as usize]; rows as usize];
         for row in 0..rows as usize {
             for col in 0..cols as usize {
                 if is_fg[row][col] {
                     row.hash(&mut hasher);
                     col.hash(&mut hasher);
-                    candidate[row][col] = hasher.finish() & 3 != 3;
+                    candidate[row][col] = hasher.finish() % 100 < HORIZON_GROUP_PERCENT;
                 }
             }
         }
@@ -404,12 +451,52 @@ impl HorizonLayout {
             }
         }
 
+        // --- Step 3.6: cut waterfalls at band boundaries every HORIZON_BAND_ROWS rows ---
+        //
+        // Where a waterfall crosses a band boundary it is cut there with
+        // HORIZON_BAND_CUT_CHANCE probability (split by adjacency again, in
+        // case a piece falls apart). The pieces keep their lane, so chaining
+        // below can still join them to waterfalls of the other direction, but
+        // never back to each other.
+        let mut cut_groups: Vec<(LaneId, Vec<Cell>)> = Vec::new();
+        for (lane_id, cells) in groups {
+            let mut bands: std::collections::BTreeMap<usize, Vec<Cell>> =
+                std::collections::BTreeMap::new();
+            for &cell in &cells {
+                bands
+                    .entry(cell.0 / HORIZON_BAND_ROWS)
+                    .or_default()
+                    .push(cell);
+            }
+            // Consecutive bands stay in one piece unless the boundary between
+            // them is cut.
+            let mut pieces: Vec<Vec<Cell>> = Vec::new();
+            for (band, band_cells) in bands {
+                let cut = !pieces.is_empty() && {
+                    (cells[0], band).hash(&mut hasher);
+                    hasher.finish() % HORIZON_BAND_CUT_CHANCE.1 < HORIZON_BAND_CUT_CHANCE.0
+                };
+                match pieces.last_mut() {
+                    Some(piece) if !cut => piece.extend(band_cells),
+                    _ => pieces.push(band_cells),
+                }
+            }
+            for piece in pieces {
+                for component in connected_components(&piece, &neighbours) {
+                    cut_groups.push((lane_id, component));
+                }
+            }
+        }
+        let groups = cut_groups;
+
         // --- Step 3.75: chain east and west waterfalls that meet end to end ---
         //
-        // Waterfall A and B are joined when they run in opposite directions and
-        // an end cell of A lies on B's lane right next to an end of B: it would
-        // have continued B had A not claimed it. Joins chain, so a zigzag of
-        // waterfalls becomes one group.
+        // Waterfalls A and B are joined when they run in opposite directions
+        // and an end of A lies on B's lane right next to an end of B: it would
+        // have continued B had A not claimed it. Each end joins at most once and
+        // both joins of a waterfall must be of one kind (ChainKind), so a chain
+        // is a single zigzag running either down the image or sideways, never a
+        // branching cluster or one that turns.
         let group_of: std::collections::HashMap<(usize, usize), usize> = groups
             .iter()
             .enumerate()
@@ -431,27 +518,67 @@ impl HorizonLayout {
             }
             i
         }
-        for (a, ((direction_a, _), cells_a)) in groups.iter().enumerate() {
-            if cells_a.len() < 2 {
-                continue;
-            }
-            let other = direction_a.opposite();
-            for &end in cells_a.iter().filter(|&&cell| is_end(a, cell)) {
-                for next in neighbours(end.0, end.1) {
-                    let Some(&b) = group_of.get(&next) else {
-                        continue;
-                    };
-                    let ((direction_b, lane_b), cells_b) = &groups[b];
-                    if b != a
-                        && *direction_b == other
-                        && cells_b.len() >= 2
-                        && *lane_b == lane(other, end)
-                        && is_end(b, next)
-                    {
-                        let (root_a, root_b) = (root(&mut parent, a), root(&mut parent, b));
-                        parent[root_a] = root_b;
-                    }
+        // A waterfall's top and bottom ends: down the lane means down a row, or
+        // within a row east for east lanes and west for west lanes.
+        let down_key = |direction: LaneDirection, (r, c): Cell| match direction {
+            LaneDirection::East => (r, c as isize),
+            LaneDirection::West => (r, -(c as isize)),
+        };
+        let ends: Vec<Option<(Cell, Cell)>> = groups
+            .iter()
+            .enumerate()
+            .map(|(index, ((direction, _), cells))| {
+                if cells.len() < 2 {
+                    return None;
                 }
+                let key = |cell: &&Cell| down_key(*direction, **cell);
+                let path_ends = || cells.iter().filter(|&&cell| is_end(index, cell));
+                Some((*path_ends().min_by_key(key)?, *path_ends().max_by_key(key)?))
+            })
+            .collect();
+        let mut used_ends: HashSet<Cell> = HashSet::new();
+        let mut join_kind: Vec<Option<ChainKind>> = vec![None; groups.len()];
+        for (a, ((direction_a, _), _)) in groups.iter().enumerate() {
+            let Some((top_a, bottom_a)) = ends[a] else {
+                continue;
+            };
+            let other = direction_a.opposite();
+            for end in [top_a, bottom_a] {
+                if used_ends.contains(&end) {
+                    continue;
+                }
+                let join = neighbours(end.0, end.1).into_iter().find_map(|next| {
+                    let &b = group_of.get(&next)?;
+                    let ((direction_b, lane_b), _) = groups[b];
+                    let (top_b, bottom_b) = ends[b]?;
+                    // Bottom to top runs down the image; two bottoms or two tops
+                    // join an east end to a west end, running sideways.
+                    let kind = if (end == bottom_a) == (next == bottom_b) {
+                        ChainKind::Sideways
+                    } else {
+                        ChainKind::Down
+                    };
+                    let fits = |existing: Option<ChainKind>| existing.is_none_or(|k| k == kind);
+                    (b != a
+                        && direction_b == other
+                        && lane_b == lane(other, end)
+                        && (next == top_b || next == bottom_b)
+                        && !used_ends.contains(&next)
+                        && fits(join_kind[a])
+                        && fits(join_kind[b]))
+                    .then_some((b, next, kind))
+                });
+                let Some((b, next, kind)) = join else {
+                    continue;
+                };
+                let (root_a, root_b) = (root(&mut parent, a), root(&mut parent, b));
+                if root_a == root_b {
+                    continue; // would close a loop
+                }
+                parent[root_a] = root_b;
+                used_ends.extend([end, next]);
+                join_kind[a] = Some(kind);
+                join_kind[b] = Some(kind);
             }
         }
         let mut chained: std::collections::BTreeMap<usize, Vec<(usize, usize)>> =
