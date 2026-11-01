@@ -26,6 +26,12 @@ pub struct SmallText {
     /// Error correction: 0 = Low (~7% of the code can be damaged), 1 = Medium (~15%),
     /// 2 = Quartile (~25%), 3 = High (~30%). Higher levels make the grid larger.
     pub ecc_level: u32,
+    /// PNG bytes of an image drawn over the centre of the code (a logo, or text rendered by
+    /// Dart); empty for none
+    pub overlay_png: Vec<u8>,
+    /// Share of the code's area the overlay takes: above 0 and at most
+    /// `tricode::EccLevel::max_overlay_share` of the level; ignored without an overlay
+    pub overlay_share: f64,
 }
 
 /// Image bytes to be decoded.
@@ -72,4 +78,5 @@ pub struct GeneratedImage {
     pub mask_name: String,
     pub colour_transitions: u32, // shared triangle edges between cells of different colour
     pub shared_edges: u32,       // all triangle edges shared by two cells
+    pub overlay_decodes: Option<bool>, // whether the code still decodes with its overlay; None without one
 }

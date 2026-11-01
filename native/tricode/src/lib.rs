@@ -82,7 +82,10 @@ fn check_image_pixels(
 }
 
 use image::codecs::png::PngEncoder;
-use image::{ExtendedColorType, GrayImage, ImageBuffer, ImageEncoder, Rgba};
+use image::{
+    ExtendedColorType, GrayImage, ImageBuffer, ImageEncoder, ImageFormat, ImageReader, Rgba,
+    RgbaImage,
+};
 use imageproc::contrast::{ThresholdType, threshold};
 use imageproc::distance_transform::Norm;
 use imageproc::morphology::dilate;
@@ -91,6 +94,7 @@ use rayon::prelude::*;
 mod reed_solomon;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::io::Cursor;
 
 /// Pack a text payload into msgpack: `{"type": "<kind>", "value": "<payload>"}`.
 pub fn pack_payload(kind: &str, text: &str) -> Result<Vec<u8>, String> {
@@ -405,6 +409,8 @@ pub struct GenerateDebug {
     pub mask_index: usize,     // index into MASKS of the mask the data was XORed with
     pub colour_transitions: usize, // shared triangle edges between cells of different colour
     pub shared_edges: usize,   // all triangle edges shared by two cells
+    /// Whether the code still decodes with its overlay; `None` without one.
+    pub overlay_decodes: Option<bool>,
 }
 
 /// Convert a Flutter/Android-style ARGB `u32` (`0xAARRGGBB`) to an `Rgba<u8>`.
@@ -438,6 +444,7 @@ pub fn generate_image(
         mask: None,
         triangle_width: DEFAULT_TRIANGLE_WIDTH,
         ecc_level: DEFAULT_ECC_LEVEL,
+        overlay: None,
     })
     .map(|debug| debug.png_bytes)
     .unwrap_or_default()
@@ -461,13 +468,36 @@ pub struct GenerateImageParams<'a> {
     pub triangle_width: u32,
     /// How much damage the code survives; higher levels need a larger grid.
     pub ecc_level: EccLevel,
+    /// An image drawn over the centre of the code, if any.
+    pub overlay: Option<Overlay<'a>>,
 }
+
+/// An image drawn over the centre of a code, such as a logo or a line of text. The triangles under
+/// it are left out, so the decoder reads them as damage that the error correction repairs.
+#[derive(Debug, Clone, Copy)]
+pub struct Overlay<'a> {
+    /// PNG bytes of the image; its transparent parts show the background.
+    pub png: &'a [u8],
+    /// Share of the code's area the overlay's box takes, above 0 and at most
+    /// [`EccLevel::max_overlay_share`] of the code's level.
+    pub share: f64,
+}
+
+/// Largest overlay image accepted, in pixels; larger ones should be scaled down before sending.
+pub const MAX_OVERLAY_PIXELS: u64 = 16_000_000;
 
 /// Generates a PNG image encoding the payload text, returning full debug info.
 pub fn generate_image_debug(params: GenerateImageParams<'_>) -> Result<GenerateDebug, String> {
     validate_triangle_width(params.triangle_width)?;
     let payload_bytes = pack_payload(params.payload_type, params.payload)?;
-    create_image_from_payload(&payload_bytes, &params)
+    let mut debug = create_image_from_payload(&payload_bytes, &params)?;
+    if params.overlay.is_some() {
+        // The overlay's share is kept within what the level repairs, but what it covers varies;
+        // reading the code back tells for sure.
+        let decoded = decode_image(&debug.png_bytes)?;
+        debug.overlay_decodes = Some(decoded.text.as_deref() == Some(params.payload));
+    }
+    Ok(debug)
 }
 
 /// The triangle grid in pixel coordinates, shared by every cell so that neighbouring triangles
@@ -936,6 +966,10 @@ fn create_image_from_payload(
     } = *params;
     let fg = argb_to_rgba(params.fg_color, true);
     let bg = argb_to_rgba(params.bg_color, false);
+    let overlay = params
+        .overlay
+        .map(|overlay| load_overlay(overlay, params.ecc_level))
+        .transpose()?;
 
     // Calculate dimensions maintaining the aspect ratio and ensuring enough bit squares
     let gcd_val = gcd(width_ratio, height_ratio);
@@ -998,11 +1032,17 @@ fn create_image_from_payload(
     };
 
     let grid = TriangleGrid::new(height_squares, width_squares, triangle_width);
-    let shapes = cell_shapes(
+    let mut shapes = cell_shapes(
         &layout_cells(&data, height_squares, width_squares),
         style,
         horizon_layout.as_ref(),
     );
+    let overlay_box = overlay
+        .as_ref()
+        .map(|(image, share)| overlay_box(image, *share, width, height));
+    if let Some(overlay_box) = &overlay_box {
+        clear_cells_under(&mut shapes, &grid, overlay_box);
+    }
     let shape_of = |row: i64, col: i64| -> Option<usize> {
         if row < 0 || col < 0 || row >= grid.rows || col >= grid.cols {
             return None;
@@ -1055,6 +1095,10 @@ fn create_image_from_payload(
             }
         });
 
+    if let (Some((image, _)), Some(overlay_box)) = (&overlay, &overlay_box) {
+        draw_overlay(&mut img, image, overlay_box, triangle_width);
+    }
+
     let mut png_bytes = Vec::new();
     PngEncoder::new(&mut png_bytes)
         .write_image(img.as_raw(), width, height, ExtendedColorType::Rgba8)
@@ -1070,7 +1114,131 @@ fn create_image_from_payload(
         mask_index,
         colour_transitions,
         shared_edges,
+        overlay_decodes: None,
     })
+}
+
+/// Decodes an overlay's image and checks its share against what `level` repairs.
+fn load_overlay(overlay: Overlay<'_>, level: EccLevel) -> Result<(RgbaImage, f64), String> {
+    let max_share = level.max_overlay_share();
+    if !(overlay.share > 0.0 && overlay.share <= max_share) {
+        return Err(format!(
+            "Overlay must take between 0% and {:.0}% of a {} level code, got {:.1}%",
+            max_share * 100.0,
+            level.name(),
+            overlay.share * 100.0
+        ));
+    }
+    let reader = ImageReader::with_format(Cursor::new(overlay.png), ImageFormat::Png);
+    let (w, h) = reader
+        .into_dimensions()
+        .map_err(|e| format!("Failed to read overlay image: {}", e))?;
+    if w as u64 * h as u64 > MAX_OVERLAY_PIXELS {
+        return Err(format!(
+            "Overlay image of {}×{} px is larger than {} MP",
+            w,
+            h,
+            MAX_OVERLAY_PIXELS / 1_000_000
+        ));
+    }
+    let image = image::load_from_memory_with_format(overlay.png, ImageFormat::Png)
+        .map_err(|e| format!("Failed to read overlay image: {}", e))?
+        .to_rgba8();
+    Ok((image, overlay.share))
+}
+
+/// A rectangle in pixels: left, top, right and bottom edges.
+#[derive(Debug, Clone, Copy)]
+struct PixelBox {
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
+}
+
+/// Largest share of the code's width or height the overlay box spans, so a very wide or tall
+/// overlay can't reach the corner anchors.
+const MAX_OVERLAY_SPAN: f64 = 0.8;
+
+/// The box an overlay is drawn in: centred, `share` of the code's area, with the image's aspect
+/// ratio (narrowed to [`MAX_OVERLAY_SPAN`] of the code when it is very wide or tall).
+fn overlay_box(image: &RgbaImage, share: f64, width: u32, height: u32) -> PixelBox {
+    let (width, height) = (width as f64, height as f64);
+    let aspect = image.width().max(1) as f64 / image.height().max(1) as f64;
+    let area = share * width * height;
+    let box_width = (area * aspect).sqrt().min(width * MAX_OVERLAY_SPAN);
+    let box_height = (area / aspect).sqrt().min(height * MAX_OVERLAY_SPAN);
+    PixelBox {
+        left: (width - box_width) / 2.0,
+        top: (height - box_height) / 2.0,
+        right: (width + box_width) / 2.0,
+        bottom: (height + box_height) / 2.0,
+    }
+}
+
+/// Leaves out every cell whose triangle reaches into the box, so whole triangles disappear rather
+/// than being cut, and borders run around the gap like around any other background.
+fn clear_cells_under(shapes: &mut [Vec<Option<usize>>], grid: &TriangleGrid, area: &PixelBox) {
+    for (row, cells) in shapes.iter_mut().enumerate() {
+        for (col, shape) in cells.iter_mut().enumerate() {
+            let corners = grid.vertices(row as i64, col as i64);
+            let (xs, ys) = (corners.map(|c| c.0), corners.map(|c| c.1));
+            let min = |v: [f64; 3]| v.into_iter().fold(f64::INFINITY, f64::min);
+            let max = |v: [f64; 3]| v.into_iter().fold(f64::NEG_INFINITY, f64::max);
+            if min(xs) < area.right
+                && max(xs) > area.left
+                && min(ys) < area.bottom
+                && max(ys) > area.top
+            {
+                *shape = None;
+            }
+        }
+    }
+}
+
+/// Gap between the overlay's image and the edge of its box, as a share of the triangle width.
+const OVERLAY_MARGIN: f64 = 0.15;
+
+/// Draws the overlay's image scaled to fit its box (keeping its aspect ratio), composited over the
+/// code with its alpha.
+fn draw_overlay(img: &mut RgbaImage, image: &RgbaImage, area: &PixelBox, triangle_width: u32) {
+    let margin = OVERLAY_MARGIN * triangle_width as f64;
+    let (room_w, room_h) = (
+        (area.right - area.left - 2.0 * margin).max(1.0),
+        (area.bottom - area.top - 2.0 * margin).max(1.0),
+    );
+    let scale = (room_w / image.width().max(1) as f64).min(room_h / image.height().max(1) as f64);
+    let (w, h) = (
+        ((image.width() as f64 * scale).round() as u32).max(1),
+        ((image.height() as f64 * scale).round() as u32).max(1),
+    );
+    let scaled = image::imageops::resize(image, w, h, image::imageops::FilterType::Lanczos3);
+    let x0 = ((area.left + area.right - w as f64) / 2.0).round() as u32;
+    let y0 = ((area.top + area.bottom - h as f64) / 2.0).round() as u32;
+    for (x, y, src) in scaled.enumerate_pixels() {
+        let (px, py) = (x0 + x, y0 + y);
+        if px < img.width() && py < img.height() {
+            let dst = img.get_pixel_mut(px, py);
+            *dst = over(*src, *dst);
+        }
+    }
+}
+
+/// Porter-Duff "over": `src` composited on top of `dst`, both with straight alpha.
+fn over(src: Rgba<u8>, dst: Rgba<u8>) -> Rgba<u8> {
+    let (sa, da) = (src[3] as f64 / 255.0, dst[3] as f64 / 255.0);
+    let out_a = sa + da * (1.0 - sa);
+    if out_a == 0.0 {
+        return Rgba([0, 0, 0, 0]);
+    }
+    let channel =
+        |i: usize| ((src[i] as f64 * sa + dst[i] as f64 * da * (1.0 - sa)) / out_a).round() as u8;
+    Rgba([
+        channel(0),
+        channel(1),
+        channel(2),
+        (out_a * 255.0).round() as u8,
+    ])
 }
 
 /// Rows rendered together by one parallel task.
@@ -1235,6 +1403,18 @@ impl EccLevel {
             2 => EccLevel::Quartile,
             3 => EccLevel::High,
             _ => EccLevel::Medium,
+        }
+    }
+
+    /// Largest share of the code's area an [`Overlay`] may take at this level. These are the
+    /// solid covers `survives_a_covered_centre` checks, so a code with an overlay this large still
+    /// decodes.
+    pub fn max_overlay_share(self) -> f64 {
+        match self {
+            EccLevel::Low => 0.02,
+            EccLevel::Medium => 0.06,
+            EccLevel::Quartile => 0.15,
+            EccLevel::High => 0.18,
         }
     }
 
@@ -2975,6 +3155,7 @@ mod tests {
             mask: None,
             triangle_width,
             ecc_level: DEFAULT_ECC_LEVEL,
+            overlay: None,
         })
         .expect("generation failed")
     }
@@ -3219,6 +3400,7 @@ mod tests {
                             mask: None,
                             triangle_width: DEFAULT_TRIANGLE_WIDTH,
                             ecc_level: DEFAULT_ECC_LEVEL,
+                            overlay: None,
                         },
                     )
                     .expect("generation failed");
@@ -3282,6 +3464,7 @@ mod tests {
             mask: None,
             triangle_width: DEFAULT_TRIANGLE_WIDTH,
             ecc_level,
+            overlay: None,
         })
         .expect("generation failed")
     }
@@ -3384,6 +3567,113 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A PNG overlay `w`×`h` px: a dark disc with a light fine pattern inside, transparent around
+    /// it, like a logo.
+    fn logo_png(w: u32, h: u32) -> Vec<u8> {
+        let (cx, cy, r) = (w as f64 / 2.0, h as f64 / 2.0, w.min(h) as f64 / 2.0);
+        let img = RgbaImage::from_fn(w, h, |x, y| {
+            let d = (x as f64 + 0.5 - cx).hypot(y as f64 + 0.5 - cy);
+            match d {
+                d if d > r => Rgba([0, 0, 0, 0]),
+                d if d < r * 0.6 && (x / 4 + y / 4) % 2 == 0 => Rgba([240, 240, 240, 255]),
+                _ => Rgba([20, 20, 60, 255]),
+            }
+        });
+        let mut out = Vec::new();
+        PngEncoder::new(&mut out)
+            .write_image(img.as_raw(), w, h, ExtendedColorType::Rgba8)
+            .expect("encode failed");
+        out
+    }
+
+    fn generate_with_overlay(
+        style: ImageStyle,
+        level: EccLevel,
+        overlay: Overlay<'_>,
+    ) -> Result<GenerateDebug, String> {
+        generate_image_debug(GenerateImageParams {
+            payload: &payload(150),
+            payload_type: "text",
+            width_ratio: 16,
+            height_ratio: 9,
+            style,
+            fg_color: 0xFF000000,
+            bg_color: 0xFFFFFFFF,
+            horizon_seed: 42,
+            mask: None,
+            triangle_width: DEFAULT_TRIANGLE_WIDTH,
+            ecc_level: level,
+            overlay: Some(overlay),
+        })
+    }
+
+    #[test]
+    fn decodes_with_the_largest_overlay_of_each_level() {
+        // A square logo and a wide one, as a line of text renders.
+        let (square, wide) = (logo_png(200, 200), logo_png(600, 120));
+        for level in EccLevel::ALL {
+            for style in [ImageStyle::Tiles, ImageStyle::Horizon] {
+                for png in [&square, &wide] {
+                    let overlay = Overlay {
+                        png,
+                        share: level.max_overlay_share(),
+                    };
+                    let generated =
+                        generate_with_overlay(style, level, overlay).expect("generation failed");
+                    assert_eq!(generated.overlay_decodes, Some(true), "{style:?} {level:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn overlay_changes_the_centre_only() {
+        let plain = generate_with_level(ImageStyle::Tiles, 150, EccLevel::High);
+        let png = logo_png(100, 100);
+        let overlay = Overlay {
+            png: &png,
+            share: 0.1,
+        };
+        let covered =
+            generate_with_overlay(ImageStyle::Tiles, EccLevel::High, overlay).expect("failed");
+        let (a, b) = (
+            image::load_from_memory(&plain.png_bytes)
+                .expect("load")
+                .to_rgba8(),
+            image::load_from_memory(&covered.png_bytes)
+                .expect("load")
+                .to_rgba8(),
+        );
+        assert_eq!(a.dimensions(), b.dimensions());
+        let (w, h) = a.dimensions();
+        // The corners, where the anchors are, stay untouched; the centre changes.
+        for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)] {
+            for (dx, dy) in (0..60).flat_map(|i| (0..60).map(move |j| (i, j))) {
+                let (px, py) = (x.abs_diff(dx), y.abs_diff(dy));
+                assert_eq!(a.get_pixel(px, py), b.get_pixel(px, py));
+            }
+        }
+        assert_ne!(a.get_pixel(w / 2, h / 2), b.get_pixel(w / 2, h / 2));
+    }
+
+    #[test]
+    fn refuses_bad_overlays() {
+        let png = logo_png(50, 50);
+        for share in [0.0, -0.1, EccLevel::Medium.max_overlay_share() + 0.01] {
+            let overlay = Overlay { png: &png, share };
+            let error = generate_with_overlay(ImageStyle::Tiles, EccLevel::Medium, overlay)
+                .expect_err("accepted a bad share");
+            assert!(error.contains("Overlay must take"), "{share}: {error}");
+        }
+        let overlay = Overlay {
+            png: b"not a png",
+            share: 0.05,
+        };
+        let error = generate_with_overlay(ImageStyle::Tiles, EccLevel::Medium, overlay)
+            .expect_err("accepted garbage");
+        assert!(error.contains("overlay image"), "{error}");
     }
 
     #[test]
@@ -3518,6 +3808,7 @@ mod tests {
                 mask: None,
                 triangle_width,
                 ecc_level: DEFAULT_ECC_LEVEL,
+                overlay: None,
             });
             assert!(result.is_err(), "{} px was accepted", triangle_width);
         }
@@ -3551,6 +3842,7 @@ mod tests {
             mask: None,
             triangle_width: MIN_TRIANGLE_WIDTH,
             ecc_level: DEFAULT_ECC_LEVEL,
+            overlay: None,
         })
         .expect_err("a 40 kB payload fits");
         assert!(error.contains("shorten the payload"), "{error}");
@@ -3749,6 +4041,7 @@ mod tests {
                 mask: Some(index),
                 triangle_width: DEFAULT_TRIANGLE_WIDTH,
                 ecc_level: DEFAULT_ECC_LEVEL,
+                overlay: None,
             })
             .expect("generation failed");
             assert_eq!(generated.mask_index, index, "{name}");
@@ -3777,6 +4070,7 @@ mod tests {
             mask,
             triangle_width: DEFAULT_TRIANGLE_WIDTH,
             ecc_level: DEFAULT_ECC_LEVEL,
+            overlay: None,
         };
         let auto = generate_image_debug(params(None)).expect("generation failed");
         for (index, name) in MASK_NAMES.iter().enumerate() {
@@ -3806,6 +4100,7 @@ mod tests {
                 mask: Some(index),
                 triangle_width: DEFAULT_TRIANGLE_WIDTH,
                 ecc_level: DEFAULT_ECC_LEVEL,
+                overlay: None,
             })
             .expect("generation failed");
             let cells = (generated.grid_rows * generated.grid_columns) as usize - 8;

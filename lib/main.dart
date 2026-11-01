@@ -14,6 +14,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:super_clipboard/super_clipboard.dart';
 
+import 'overlay.dart';
 import 'src/bindings/bindings.dart';
 
 /// Data masks the generator can XOR the payload with, in the same order as
@@ -191,6 +192,16 @@ class _MyHomePageState extends State<MyHomePage>
   int? _selectedMask; // null = most balanced (automatic), debug only
   Color _fgColor = Colors.black;
   Color _bgColor = Colors.white;
+  _OverlayMode _overlayMode = _OverlayMode.none;
+  final TextEditingController _overlayTextController = TextEditingController();
+  Timer? _overlayTextDebounce;
+  Uint8List? _overlayImage; // PNG, already scaled down by imageToOverlayPng
+  // Overlay size as a fraction of the largest the error correction level allows,
+  // so changing the level keeps the overlay's relative size.
+  double _overlaySize = 1.0;
+
+  /// Share of the code's area the overlay takes at the current settings.
+  double get _overlayShare => overlayMaxShares[_eccLevel] * _overlaySize;
 
   bool get _shouldShowZoomControls {
     if (_imageWidth == null || _imageHeight == null) return false;
@@ -244,6 +255,10 @@ class _MyHomePageState extends State<MyHomePage>
           _generateError = null;
           _fgColor = Colors.black;
           _bgColor = Colors.white;
+          _overlayMode = _OverlayMode.none;
+          _overlayTextController.clear();
+          _overlayImage = null;
+          _overlaySize = 1.0;
         });
       }
     });
@@ -323,7 +338,21 @@ class _MyHomePageState extends State<MyHomePage>
     });
   }
 
-  void _sendTextToRust() {
+  /// The overlay to draw over the code as PNG bytes; empty for none.
+  Future<Uint8List> _overlayPng() async {
+    switch (_overlayMode) {
+      case _OverlayMode.none:
+        return Uint8List(0);
+      case _OverlayMode.text:
+        final text = _overlayTextController.text.trim();
+        if (text.isEmpty) return Uint8List(0);
+        return textToOverlayPng(text, _fgColor.withAlpha(255));
+      case _OverlayMode.image:
+        return _overlayImage ?? Uint8List(0);
+    }
+  }
+
+  Future<void> _sendTextToRust() async {
     final text = _textController.text;
     final widthRatio = int.tryParse(_widthRatioController.text) ?? 21;
     final heightRatio = int.tryParse(_heightRatioController.text) ?? 13;
@@ -339,6 +368,17 @@ class _MyHomePageState extends State<MyHomePage>
     });
 
     final effectiveBg = _bgColor;
+    final Uint8List overlayPng;
+    try {
+      overlayPng = await _overlayPng();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isGenerating = false;
+        _generateError = 'Failed to render the overlay: $e';
+      });
+      return;
+    }
 
     SmallText(
       text: text,
@@ -354,7 +394,67 @@ class _MyHomePageState extends State<MyHomePage>
       mask: _showDebugInfo ? _selectedMask : null,
       triangleWidth: _triangleWidth,
       eccLevel: _eccLevel,
+      overlayPng: overlayPng,
+      overlayShare: _overlayShare,
     ).sendSignalToRust();
+  }
+
+  /// Regenerates the code with the current settings, if there is text to encode.
+  void _regenerate() {
+    if (_textController.text.trim().isNotEmpty) {
+      _sendTextToRust();
+    }
+  }
+
+  /// Uses [bytes] (any image format Flutter reads) as the overlay image.
+  Future<void> _setOverlayImage(Uint8List bytes) async {
+    try {
+      final png = await imageToOverlayPng(bytes);
+      if (!mounted) return;
+      setState(() => _overlayImage = png);
+      _regenerate();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Could not read image: $e')));
+      }
+    }
+  }
+
+  Future<void> _pickOverlayImage() async {
+    const typeGroup = XTypeGroup(
+      label: 'images',
+      extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'],
+    );
+    final file = await openFile(acceptedTypeGroups: [typeGroup]);
+    if (file == null) return;
+    await _setOverlayImage(await file.readAsBytes());
+  }
+
+  Future<void> _pasteOverlayImage() async {
+    final Uint8List? bytes;
+    try {
+      bytes = await readClipboardImage();
+    } on ClipboardUnavailable {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Clipboard not available on this platform'),
+          ),
+        );
+      }
+      return;
+    }
+    if (bytes == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No image found in clipboard')),
+        );
+      }
+      return;
+    }
+    await _setOverlayImage(bytes);
   }
 
   Future<void> _pickAndDecodeImage() async {
@@ -394,8 +494,10 @@ class _MyHomePageState extends State<MyHomePage>
 
   Future<void> _pasteAndDecodeImage() async {
     try {
-      final clipboard = SystemClipboard.instance;
-      if (clipboard == null) {
+      final Uint8List? imageBytes;
+      try {
+        imageBytes = await readClipboardImage();
+      } on ClipboardUnavailable {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
@@ -404,37 +506,6 @@ class _MyHomePageState extends State<MyHomePage>
           );
         }
         return;
-      }
-
-      final reader = await clipboard.read();
-
-      // Try PNG first
-      Uint8List? imageBytes;
-      if (reader.canProvide(Formats.png)) {
-        final completer = Completer<Uint8List?>();
-        reader.getFile(Formats.png, (file) async {
-          try {
-            final bytes = await file.readAll();
-            completer.complete(bytes);
-          } catch (e) {
-            completer.complete(null);
-          }
-        });
-        imageBytes = await completer.future;
-      }
-
-      // If no PNG, try JPEG
-      if (imageBytes == null && reader.canProvide(Formats.jpeg)) {
-        final completer = Completer<Uint8List?>();
-        reader.getFile(Formats.jpeg, (file) async {
-          try {
-            final bytes = await file.readAll();
-            completer.complete(bytes);
-          } catch (e) {
-            completer.complete(null);
-          }
-        });
-        imageBytes = await completer.future;
       }
 
       if (imageBytes == null) {
@@ -1217,6 +1288,8 @@ class _MyHomePageState extends State<MyHomePage>
                       ),
                     ),
                     const SizedBox(height: 16),
+                    _buildOverlayOptions(context),
+                    const SizedBox(height: 16),
                     if (_showDebugInfo) ...[
                       Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 16.0),
@@ -1367,6 +1440,20 @@ class _MyHomePageState extends State<MyHomePage>
                         ),
                       ],
                     ),
+                    if (_generateDebug?.overlayDecodes == false) ...[
+                      const SizedBox(height: 12),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                        child: Text(
+                          'This code doesn\'t decode with its overlay. Make the '
+                          'overlay smaller or raise the error correction.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: Theme.of(context).colorScheme.error,
+                          ),
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 16),
                     // Image preview with zoom and pan
                     Listener(
@@ -1523,9 +1610,146 @@ class _MyHomePageState extends State<MyHomePage>
     _seedDebounce?.cancel();
     _triangleWidthController.dispose();
     _triangleWidthDebounce?.cancel();
+    _overlayTextController.dispose();
+    _overlayTextDebounce?.cancel();
     super.dispose();
   }
+
+  /// The overlay drawn over the centre of the code: none, a line of text or an
+  /// image, and how much of the code it covers.
+  Widget _buildOverlayOptions(BuildContext context) {
+    final maxPercent = overlayMaxShares[_eccLevel] * 100;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16.0),
+      child: InputDecorator(
+        decoration: const InputDecoration(
+          labelText: 'Centre overlay',
+          border: OutlineInputBorder(),
+        ),
+        child: Column(
+          children: [
+            SegmentedButton<_OverlayMode>(
+              segments: const [
+                ButtonSegment(value: _OverlayMode.none, label: Text('None')),
+                ButtonSegment(value: _OverlayMode.text, label: Text('Text')),
+                ButtonSegment(value: _OverlayMode.image, label: Text('Image')),
+              ],
+              selected: {_overlayMode},
+              onSelectionChanged: (selection) {
+                setState(() => _overlayMode = selection.first);
+                _regenerate();
+              },
+            ),
+            if (_overlayMode == _OverlayMode.text) ...[
+              const SizedBox(height: 12),
+              TextField(
+                controller: _overlayTextController,
+                minLines: 1,
+                maxLines: 3,
+                decoration: const InputDecoration(
+                  labelText: 'Overlay text',
+                  helperText: 'Drawn in the triangle colour',
+                  border: OutlineInputBorder(),
+                ),
+                onChanged: (_) {
+                  _overlayTextDebounce?.cancel();
+                  _overlayTextDebounce = Timer(
+                    const Duration(milliseconds: 500),
+                    _regenerate,
+                  );
+                },
+              ),
+            ],
+            if (_overlayMode == _OverlayMode.image) ...[
+              const SizedBox(height: 12),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  if (_overlayImage != null) ...[
+                    Container(
+                      width: 56,
+                      height: 56,
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.grey),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(3),
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            CustomPaint(painter: _CheckerPainter()),
+                            Image.memory(_overlayImage!, fit: BoxFit.contain),
+                          ],
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Remove image',
+                      icon: const Icon(Icons.close),
+                      onPressed: () {
+                        setState(() => _overlayImage = null);
+                        _regenerate();
+                      },
+                    ),
+                    const SizedBox(width: 8),
+                  ],
+                  OutlinedButton.icon(
+                    onPressed: _pickOverlayImage,
+                    icon: const Icon(Icons.image),
+                    label: const Text('Choose…'),
+                  ),
+                  const SizedBox(width: 8),
+                  OutlinedButton.icon(
+                    onPressed: _pasteOverlayImage,
+                    icon: const Icon(Icons.content_paste),
+                    label: const Text('Paste'),
+                  ),
+                ],
+              ),
+            ],
+            if (_overlayMode != _OverlayMode.none) ...[
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  const Text('Size'),
+                  Expanded(
+                    child: Slider(
+                      value: _overlaySize,
+                      min: 0.2,
+                      max: 1.0,
+                      divisions: 8,
+                      label: '${(_overlayShare * 100).toStringAsFixed(1)}%',
+                      onChanged: (value) =>
+                          setState(() => _overlaySize = value),
+                      onChangeEnd: (_) => _regenerate(),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 56,
+                    child: Text(
+                      '${(_overlayShare * 100).toStringAsFixed(1)}%',
+                      textAlign: TextAlign.end,
+                    ),
+                  ),
+                ],
+              ),
+              Text(
+                'Up to ${maxPercent.toStringAsFixed(0)}% of the code at this '
+                'error correction level; raise it for a larger overlay.',
+                style: const TextStyle(fontSize: 12, color: Colors.grey),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
 }
+
+/// What is drawn over the centre of a generated code.
+enum _OverlayMode { none, text, image }
 
 class _ColorSwatch extends StatelessWidget {
   const _ColorSwatch({
@@ -1733,6 +1957,8 @@ class _GenerateDebugTable extends StatelessWidget {
         '${result.colourTransitions} / ${result.sharedEdges} edges'
             ' (${result.sharedEdges == 0 ? 0 : (100 * result.colourTransitions / result.sharedEdges).toStringAsFixed(1)}%)',
       ),
+      if (result.overlayDecodes case final decodes?)
+        ('Overlay decodes', decodes ? 'yes' : 'no'),
     ];
     return Table(
       columnWidths: const {0: IntrinsicColumnWidth(), 1: FlexColumnWidth()},

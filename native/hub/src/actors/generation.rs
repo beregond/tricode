@@ -46,6 +46,10 @@ impl Notifiable<SmallText> for GenerationActor {
             mask: msg.mask.map(|m| m as usize),
             triangle_width: msg.triangle_width,
             ecc_level: tricode::EccLevel::from_u32(msg.ecc_level),
+            overlay: (!msg.overlay_png.is_empty()).then_some(tricode::Overlay {
+                png: &msg.overlay_png,
+                share: msg.overlay_share,
+            }),
         });
         let signal = match result {
             Ok(debug) => GeneratedImage {
@@ -64,6 +68,7 @@ impl Notifiable<SmallText> for GenerationActor {
                     .to_string(),
                 colour_transitions: debug.colour_transitions as u32,
                 shared_edges: debug.shared_edges as u32,
+                overlay_decodes: debug.overlay_decodes,
             },
             Err(error) => GeneratedImage {
                 png_bytes: Vec::new(),
@@ -77,6 +82,7 @@ impl Notifiable<SmallText> for GenerationActor {
                 mask_name: String::new(),
                 colour_transitions: 0,
                 shared_edges: 0,
+                overlay_decodes: None,
             },
         };
         signal.send_signal_to_dart();
