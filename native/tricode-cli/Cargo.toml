@@ -1,0 +1,17 @@
+[package]
+name = "tricode-cli"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+# The command is `tricode`; the Flutter app's binary is `tricode-gui`, so both install side by side.
+[[bin]]
+name = "tricode"
+path = "src/main.rs"
+# Its docs would collide with the `tricode` library's in target/doc/tricode.
+doc = false
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+tricode = { version = "0.1.0", path = "../tricode" }

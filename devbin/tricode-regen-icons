@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Renders assets/logo/tricode.svg into every platform's app icons.
+# Each PNG keeps the size of the file it replaces. Needs rsvg-convert and ImageMagick.
+# iOS icons and the web maskable icons get a white background: the App Store refuses
+# transparent icons, and maskable icons are cropped to any shape by the launcher.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+svg=assets/logo/tricode.svg
+
+# render <size> <out> [background]
+render() {
+  local bg=()
+  if [[ -n "${3:-}" ]]; then bg=(--background-color="$3"); fi
+  rsvg-convert -w "$1" -h "$1" "${bg[@]}" "$svg" -o "$2"
+}
+
+# Re-renders an existing PNG at its own size.
+rerender() {
+  local size
+  size=$(magick identify -format %w "$1")
+  render "$size" "$1" "${2:-}"
+}
+
+for f in android/app/src/main/res/mipmap-*/ic_launcher.png \
+  macos/Runner/Assets.xcassets/AppIcon.appiconset/*.png \
+  web/favicon.png web/icons/Icon-[0-9]*.png; do
+  rerender "$f"
+done
+
+for f in ios/Runner/Assets.xcassets/AppIcon.appiconset/*.png; do
+  rerender "$f" white
+done
+
+# The launcher keeps only a centred circle of 80% of the icon's width. The SVG drawn
+# at 70% of the canvas puts the triangle's corners just inside that circle.
+for f in web/icons/Icon-maskable-*.png; do
+  size=$(magick identify -format %w "$f")
+  inner=$((size * 70 / 100))
+  rsvg-convert -w "$inner" -h "$inner" "$svg" |
+    magick -size "${size}x${size}" xc:white - -gravity center -composite "$f"
+done
+
+mkdir -p linux/runner/resources
+render 256 linux/runner/resources/app_icon.png
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+for s in 16 24 32 48 64 256; do
+  render "$s" "$tmp/$s.png"
+done
+magick "$tmp"/{16,24,32,48,64,256}.png windows/runner/resources/app_icon.ico

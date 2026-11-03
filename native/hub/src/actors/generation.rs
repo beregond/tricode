@@ -1,8 +1,9 @@
 use crate::signals::{GeneratedImage, SmallText};
 use async_trait::async_trait;
 use messages::prelude::{Actor, Address, Context, Notifiable};
-use rinf::{DartSignal, RustSignal, debug_print};
+use rinf::{DartSignal, RustSignal};
 use tokio::task::JoinSet;
+use tracing::{debug, error, warn};
 
 // Uncomment below to target the web.
 // use tokio_with_wasm::alias as tokio;
@@ -31,61 +32,87 @@ impl GenerationActor {
 #[async_trait]
 impl Notifiable<SmallText> for GenerationActor {
     async fn notify(&mut self, msg: SmallText, _: &Context<Self>) {
-        debug_print!("Received text: {}", msg.text);
-
-        let style = tricode::ImageStyle::from_u32(msg.style);
-        let result = tricode::generate_image_debug(tricode::GenerateImageParams {
-            payload: &msg.text,
-            payload_type: &msg.payload_type,
-            width_ratio: msg.width_ratio,
-            height_ratio: msg.height_ratio,
-            style,
-            fg_color: msg.fg_color,
-            bg_color: msg.bg_color,
-            horizon_seed: msg.horizon_seed,
-            mask: msg.mask.map(|m| m as usize),
-            triangle_width: msg.triangle_width,
-            ecc_level: tricode::EccLevel::from_u32(msg.ecc_level),
-            overlay: (!msg.overlay_png.is_empty()).then_some(tricode::Overlay {
-                png: &msg.overlay_png,
-                share: msg.overlay_share,
-            }),
-        });
-        let signal = match result {
-            Ok(debug) => GeneratedImage {
-                png_bytes: debug.png_bytes,
-                error: String::new(),
-                encoded_bytes: debug.encoded_bytes as u32,
-                grid_rows: debug.grid_rows,
-                grid_columns: debug.grid_columns,
-                data_bits_used: debug.data_bits_used as u32,
-                padding_bits: debug.padding_bits as u32,
-                mask_index: debug.mask_index as u32,
-                mask_name: tricode::MASK_NAMES
-                    .get(debug.mask_index)
-                    .copied()
-                    .unwrap_or_default()
-                    .to_string(),
-                colour_transitions: debug.colour_transitions as u32,
-                shared_edges: debug.shared_edges as u32,
-                decode_warning: debug.decode_warning.unwrap_or_default(),
-            },
-            Err(error) => GeneratedImage {
-                png_bytes: Vec::new(),
-                error,
-                encoded_bytes: 0,
-                grid_rows: 0,
-                grid_columns: 0,
-                data_bits_used: 0,
-                padding_bits: 0,
-                mask_index: 0,
-                mask_name: String::new(),
-                colour_transitions: 0,
-                shared_edges: 0,
-                decode_warning: String::new(),
-            },
+        // Rendering and reading the code back take up to seconds, which would stall the
+        // single-threaded runtime.
+        let signal = match tokio::task::spawn_blocking(move || generate(&msg)).await {
+            Ok(signal) => signal,
+            Err(e) => {
+                error!(error = %e, "generation task failed");
+                failure(format!("Generation failed: {e}"))
+            }
         };
         signal.send_signal_to_dart();
+    }
+}
+
+/// Generates the code `msg` asks for, as the signal to send back.
+fn generate(msg: &SmallText) -> GeneratedImage {
+    let result = tricode::generate_image_debug(tricode::GenerateImageParams {
+        payload: &msg.text,
+        payload_type: &msg.payload_type,
+        width_ratio: msg.width_ratio,
+        height_ratio: msg.height_ratio,
+        style: tricode::ImageStyle::from_u32(msg.style),
+        fg_color: msg.fg_color,
+        bg_color: msg.bg_color,
+        horizon_seed: msg.horizon_seed,
+        mask: msg.mask.map(|m| m as usize),
+        triangle_width: msg.triangle_width,
+        ecc_level: tricode::EccLevel::from_u32(msg.ecc_level),
+        overlay: (!msg.overlay_png.is_empty()).then_some(tricode::Overlay {
+            png: &msg.overlay_png,
+            share: msg.overlay_share,
+        }),
+    });
+    let report = match result {
+        Ok(report) => report,
+        Err(error) => return failure(error),
+    };
+    debug!(
+        // The payload is user content: log its size, never the text.
+        chars = msg.text.chars().count(),
+        rows = report.grid_rows,
+        cols = report.grid_columns,
+        "generated"
+    );
+    if let Some(warning) = &report.decode_warning {
+        warn!(%warning, "generated code may not read back");
+    }
+    GeneratedImage {
+        png_bytes: report.png_bytes,
+        error: String::new(),
+        encoded_bytes: report.encoded_bytes as u32,
+        grid_rows: report.grid_rows,
+        grid_columns: report.grid_columns,
+        data_bits_used: report.data_bits_used as u32,
+        padding_bits: report.padding_bits as u32,
+        mask_index: report.mask_index as u32,
+        mask_name: tricode::MASK_NAMES
+            .get(report.mask_index)
+            .copied()
+            .unwrap_or_default()
+            .to_string(),
+        colour_transitions: report.colour_transitions as u32,
+        shared_edges: report.shared_edges as u32,
+        decode_warning: report.decode_warning.unwrap_or_default(),
+    }
+}
+
+/// The signal for a generation that failed with `error`.
+fn failure(error: String) -> GeneratedImage {
+    GeneratedImage {
+        png_bytes: Vec::new(),
+        error,
+        encoded_bytes: 0,
+        grid_rows: 0,
+        grid_columns: 0,
+        data_bits_used: 0,
+        padding_bits: 0,
+        mask_index: 0,
+        mask_name: String::new(),
+        colour_transitions: 0,
+        shared_edges: 0,
+        decode_warning: String::new(),
     }
 }
 

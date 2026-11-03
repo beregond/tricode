@@ -18,7 +18,7 @@ env:
   RUST_TOOLCHAIN: "1.97.1"
   FLUTTER_VERSION: "3.47.2"
   # Must match `rinf` in native/hub/Cargo.toml and pubspec.yaml.
-  RINF_VERSION: "8.10.0"
+  RINF_VERSION: "8.11.0"
 
 jobs:
   rust-lint:
@@ -32,7 +32,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   rust-test:
     name: Rust tests
@@ -43,7 +43,17 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
-      - run: devbin/tricode-test
+      - run: devbin/tricode-test --locked
+      # Old fixtures can still decode after a rendering change, so the tests above don't catch
+      # a forgotten regeneration.
+      - name: Check decode fixtures are up to date
+        run: |
+          devbin/tricode-regen-fixtures --locked
+          if [ -n "$(git status --porcelain -- native/tricode/testdata/decode)" ]; then
+            git status --short -- native/tricode/testdata/decode
+            echo "::error::Decode fixtures are stale. Run devbin/tricode-regen-fixtures and commit the result."
+            exit 1
+          fi
 
   flutter:
     name: Flutter (format, analyze, test)
@@ -59,12 +69,12 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
-      - run: flutter pub get
+      - run: flutter pub get --enforce-lockfile
       # lib/src/bindings/ is gitignored, and the Dart code doesn't compile without it.
       - run: cargo install rinf_cli --version "$RINF_VERSION" --locked
       - run: rinf gen
       # Tracked files only: the generated bindings aren't dart-formatted.
-      - run: dart format --output=none --set-exit-if-changed $(git ls-files '*.dart')
+      - run: git ls-files -z '*.dart' | xargs -0 dart format --output=none --set-exit-if-changed
       - run: flutter analyze
       - run: flutter test
 
@@ -74,3 +84,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: shellcheck devbin/*
+
+  actionlint:
+    name: actionlint (workflows)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker://rhysd/actionlint:1.7.7
+        with:
+          args: -color

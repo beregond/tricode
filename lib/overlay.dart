@@ -9,11 +9,14 @@ import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:logging/logging.dart';
 import 'package:super_clipboard/super_clipboard.dart';
+
+final _log = Logger('overlay');
 
 /// Largest share of the code's area an overlay may take at each error
 /// correction level (indexed like `SmallText.eccLevel`), matching
-/// `EccLevel::max_overlay_share` in native/tricode/src/lib.rs.
+/// `EccLevel::max_overlay_share` in native/tricode/src/frame.rs.
 const overlayMaxShares = [0.02, 0.06, 0.15, 0.18];
 
 /// Longest side, in pixels, overlay images are scaled down to before being
@@ -243,7 +246,8 @@ Future<Uint8List?> readClipboardImage() async {
     reader.getFile(format, (file) async {
       try {
         completer.complete(await file.readAll());
-      } catch (e) {
+      } catch (e, stack) {
+        _log.warning('Could not read clipboard image', e, stack);
         completer.complete(null);
       }
     });

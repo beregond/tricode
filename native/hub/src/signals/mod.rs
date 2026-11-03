@@ -80,3 +80,21 @@ pub struct GeneratedImage {
     pub shared_edges: u32,       // all triangle edges shared by two cells
     pub decode_warning: String,  // why the code doesn't read back; empty when it decodes
 }
+
+/// One `tracing` event from Rust (hub or tricode), forwarded to the Dart log.
+#[derive(Serialize, RustSignal)]
+pub struct RustLog {
+    /// "TRACE", "DEBUG", "INFO", "WARN" or "ERROR"
+    pub level: String,
+    /// Module path of the event, e.g. "tricode" or "hub::actors::decode"
+    pub target: String,
+    /// The message, prefixed by its enclosing spans and followed by its `key=value` fields
+    pub message: String,
+}
+
+/// Replaces which Rust events reach Dart, e.g. "info,tricode=trace" (`tracing_subscriber`'s
+/// `Targets` syntax). Release builds drop debug and trace events at compile time.
+#[derive(Deserialize, DartSignal)]
+pub struct RustLogFilter {
+    pub directives: String,
+}

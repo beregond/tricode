@@ -1,0 +1,172 @@
+/// Saving, copying and pasting images, with a snack bar telling the user how
+/// it went.
+library;
+
+import 'dart:io';
+
+import 'package:file_selector/file_selector.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:logging/logging.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:super_clipboard/super_clipboard.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+import 'overlay.dart';
+
+final _log = Logger('image_io');
+
+/// Shows [text] in a snack bar, if [context] is still mounted.
+void showMessage(BuildContext context, String text) {
+  if (!context.mounted) return;
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+}
+
+/// Saves [png] as `{prefix}_{timestamp}.png`: on mobile into the app's storage
+/// directory, on desktop wherever the user picks.
+Future<void> savePng(BuildContext context, Uint8List png, String prefix) async {
+  final timestamp = DateTime.now()
+      .toIso8601String()
+      .replaceAll(':', '-')
+      .split('.')[0];
+  final name = '${prefix}_$timestamp.png';
+  try {
+    if (Platform.isAndroid || Platform.isIOS) {
+      final directory = Platform.isAndroid
+          ? await getExternalStorageDirectory()
+          : await getApplicationDocumentsDirectory();
+      if (directory == null) {
+        if (context.mounted) {
+          showMessage(context, 'Could not access storage directory');
+        }
+        return;
+      }
+      final path = '${directory.path}/$name';
+      await File(path).writeAsBytes(png);
+      if (context.mounted) showMessage(context, 'Image saved to: $path');
+    } else {
+      final location = await getSaveLocation(
+        suggestedName: name,
+        acceptedTypeGroups: [
+          const XTypeGroup(label: 'PNG Images', extensions: ['png']),
+        ],
+      );
+      if (location == null) return; // canceled
+      await XFile.fromData(
+        png,
+        mimeType: 'image/png',
+        name: name,
+      ).saveTo(location.path);
+      if (context.mounted) _showSavedSnackBar(context, location.path);
+    }
+  } catch (e, stack) {
+    _log.warning('Saving image failed', e, stack);
+    if (context.mounted) showMessage(context, 'Error saving image: $e');
+  }
+}
+
+/// Copies [png] to the system clipboard.
+Future<void> copyPng(BuildContext context, Uint8List png) async {
+  try {
+    final clipboard = SystemClipboard.instance;
+    if (clipboard == null) {
+      showMessage(context, 'Clipboard not available on this platform');
+      return;
+    }
+    final item = DataWriterItem()..add(Formats.png(png));
+    await clipboard.write([item]);
+    if (context.mounted) showMessage(context, 'Image copied to clipboard');
+  } catch (e, stack) {
+    _log.warning('Copying image failed', e, stack);
+    if (context.mounted) showMessage(context, 'Error copying to clipboard: $e');
+  }
+}
+
+/// The image on the clipboard (PNG or JPEG bytes), or null after telling the
+/// user why there is none.
+Future<Uint8List?> pasteImage(BuildContext context) async {
+  try {
+    final bytes = await readClipboardImage();
+    if (bytes == null && context.mounted) {
+      showMessage(context, 'No image found in clipboard');
+    }
+    return bytes;
+  } on ClipboardUnavailable {
+    if (context.mounted) {
+      showMessage(context, 'Clipboard not available on this platform');
+    }
+  } catch (e, stack) {
+    _log.warning('Clipboard paste failed', e, stack);
+    if (context.mounted) {
+      showMessage(context, 'Error pasting from clipboard: $e');
+    }
+  }
+  return null;
+}
+
+/// Lets the user pick an image file; null when they cancel.
+Future<Uint8List?> pickImageFile(List<String> extensions) async {
+  final typeGroup = XTypeGroup(label: 'images', extensions: extensions);
+  final file = await openFile(acceptedTypeGroups: [typeGroup]);
+  return file?.readAsBytes();
+}
+
+/// Tells the user where a file was saved, with an action that reveals it in
+/// the system file manager.
+void _showSavedSnackBar(BuildContext context, String path) {
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: Text('Image saved to: $path'),
+      duration: const Duration(seconds: 8),
+      action: SnackBarAction(
+        label: _revealLabel,
+        onPressed: () async {
+          if (await _revealInFileManager(path) || !context.mounted) return;
+          showMessage(context, 'Could not open the file manager');
+        },
+      ),
+    ),
+  );
+}
+
+/// Label of the action that reveals a saved file, in each system's own words.
+String get _revealLabel {
+  if (Platform.isMacOS) return 'Show in Finder';
+  if (Platform.isWindows) return 'Show in Explorer';
+  return 'Show in folder';
+}
+
+/// Opens the system file manager with [path] selected, or at least its folder
+/// open. Returns false when nothing could be opened.
+Future<bool> _revealInFileManager(String path) async {
+  final file = File(path).absolute;
+  try {
+    if (Platform.isMacOS) {
+      final result = await Process.run('open', ['-R', file.path]);
+      if (result.exitCode == 0) return true;
+    } else if (Platform.isWindows) {
+      // Explorer exits with 1 even when it worked, so the exit code is ignored.
+      await Process.run('explorer.exe', ['/select,', file.path]);
+      return true;
+    } else if (Platform.isLinux) {
+      // Nautilus, Dolphin, Nemo, Caja and others implement this freedesktop
+      // interface, which also selects the file; xdg-open below only opens the
+      // folder.
+      final result = await Process.run('dbus-send', [
+        '--session',
+        '--print-reply',
+        '--dest=org.freedesktop.FileManager1',
+        '--type=method_call',
+        '/org/freedesktop/FileManager1',
+        'org.freedesktop.FileManager1.ShowItems',
+        // dbus-send splits array items on commas, so escape them in the URI.
+        'array:string:${file.uri.toString().replaceAll(',', '%2C')}',
+        'string:',
+      ]);
+      if (result.exitCode == 0) return true;
+    }
+  } on ProcessException {
+    // The tool isn't installed or can't be run (e.g. sandboxed); fall back.
+  }
+  return launchUrl(Uri.directory(file.parent.path));
+}

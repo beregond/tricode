@@ -258,7 +258,7 @@ pub fn correct(codeword: &mut [u8], ecc: usize, erasures: &[usize]) -> Result<us
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
     #[test]
@@ -281,22 +281,22 @@ mod tests {
     fn corrects_errors_and_erasures_up_to_capacity() {
         let mut rng = ChaCha8Rng::seed_from_u64(7);
         for _ in 0..2000 {
-            let n = rng.gen_range(3..=MAX_CODEWORD);
-            let ecc = rng.gen_range(1..n);
-            let data: Vec<u8> = (0..n - ecc).map(|_| rng.r#gen()).collect();
+            let n = rng.random_range(3..=MAX_CODEWORD);
+            let ecc = rng.random_range(1..n);
+            let data: Vec<u8> = (0..n - ecc).map(|_| rng.random()).collect();
             let clean = encode(&data, ecc).expect("encode");
 
             // Split the budget 2·errors + erasures <= ecc at random.
-            let erasure_count = rng.gen_range(0..=ecc);
-            let error_count = rng.gen_range(0..=(ecc - erasure_count) / 2);
+            let erasure_count = rng.random_range(0..=ecc);
+            let error_count = rng.random_range(0..=(ecc - erasure_count) / 2);
             let mut positions: Vec<usize> = (0..n).collect();
             for i in 0..erasure_count + error_count {
-                let j = rng.gen_range(i..n);
+                let j = rng.random_range(i..n);
                 positions.swap(i, j);
             }
             let mut damaged = clean.clone();
             for &p in &positions[..erasure_count + error_count] {
-                damaged[p] ^= rng.gen_range(1..=255u8);
+                damaged[p] ^= rng.random_range(1..=255u8);
             }
             let erasures = &positions[..erasure_count];
             correct(&mut damaged, ecc, erasures).expect("within capacity");
@@ -308,21 +308,21 @@ mod tests {
     fn never_panics_on_garbage() {
         let mut rng = ChaCha8Rng::seed_from_u64(11);
         for _ in 0..20_000 {
-            let n = rng.gen_range(0..=MAX_CODEWORD + 2);
-            let ecc = rng.gen_range(0..=n + 1);
-            let mut codeword: Vec<u8> = if rng.gen_bool(0.5) || ecc >= n || n > MAX_CODEWORD {
-                (0..n).map(|_| rng.r#gen()).collect()
+            let n = rng.random_range(0..=MAX_CODEWORD + 2);
+            let ecc = rng.random_range(0..=n + 1);
+            let mut codeword: Vec<u8> = if rng.random_bool(0.5) || ecc >= n || n > MAX_CODEWORD {
+                (0..n).map(|_| rng.random()).collect()
             } else {
-                let data: Vec<u8> = (0..n - ecc).map(|_| rng.r#gen()).collect();
+                let data: Vec<u8> = (0..n - ecc).map(|_| rng.random()).collect();
                 let mut c = encode(&data, ecc).expect("encode");
-                for _ in 0..rng.gen_range(0..=ecc) {
-                    let p = rng.gen_range(0..n);
-                    c[p] = rng.r#gen();
+                for _ in 0..rng.random_range(0..=ecc) {
+                    let p = rng.random_range(0..n);
+                    c[p] = rng.random();
                 }
                 c
             };
-            let erasures: Vec<usize> = (0..rng.gen_range(0..=ecc + 2))
-                .map(|_| rng.gen_range(0..n + 2))
+            let erasures: Vec<usize> = (0..rng.random_range(0..=ecc + 2))
+                .map(|_| rng.random_range(0..n + 2))
                 .collect();
             let before = codeword.clone();
             if correct(&mut codeword, ecc, &erasures).is_err() {

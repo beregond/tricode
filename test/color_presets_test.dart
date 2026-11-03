@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:tricode_app/main.dart';
+import 'package:tricode_app/color_presets.dart';
 
 /// Grayscale value the decoder sees (the `image` crate's BT.709 luma).
 double _luma(Color c) =>
@@ -9,7 +9,7 @@ double _luma(Color c) =>
 
 void main() {
   test('every preset is far enough apart in brightness to decode', () {
-    // `MIN_LUMA_GAP` in native/tricode/src/lib.rs.
+    // `MIN_LUMA_GAP` in native/tricode/src/decode/mod.rs.
     const minLumaGap = 24;
     for (final preset in colorPresets) {
       final gap = (_luma(preset.foreground) - _luma(preset.background)).abs();

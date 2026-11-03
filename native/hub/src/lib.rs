@@ -2,6 +2,7 @@
 //! entry point of the Rust logic.
 
 mod actors;
+mod logging;
 mod signals;
 
 use actors::create_actors;
@@ -20,7 +21,8 @@ async fn main() {
     // Always use non-blocking async functions like `tokio::fs::File::open`.
     // If you must use blocking code, use `tokio::task::spawn_blocking`
     // or the equivalent provided by your async library.
-    spawn(create_actors());
+    let log_filter = logging::init();
+    spawn(create_actors(log_filter));
 
     // Keep the main function running until Dart shutdown.
     dart_shutdown().await;

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Runs the app on Linux with a Rust log filter (see Logging in AGENTS.md). The filter comes from
+# RUST_LOG, default "info,tricode=trace"; e.g. `RUST_LOG=warn tricode-run`. Extra arguments are
+# passed to `flutter run`, e.g. `tricode-run --release`.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+exec flutter run -d linux --dart-define=RUST_LOG="${RUST_LOG:-info,tricode=trace}" "$@"

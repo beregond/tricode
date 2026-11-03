@@ -1,57 +1,28 @@
-# tricode_app
+# tricode
 
-A new Flutter project.
+A Flutter + Rust app that encodes text into codes made of triangles and reads
+them back from images. Codes carry Reed-Solomon error correction, so they still
+decode with a logo or text in the centre, mirrored, or with inverted colours.
 
-## Getting Started
+## Building
 
-This project is a starting point for a Flutter application.
-
-A few resources to get you started if this is your first Flutter project:
-
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
-
-## Using Rust Inside Flutter
-
-This project leverages Flutter for GUI and Rust for the backend logic,
-utilizing the capabilities of the
-[Rinf](https://pub.dev/packages/rinf) framework.
-
-To run and build this app, you need to have
-[Flutter SDK](https://docs.flutter.dev/get-started/install)
-and [Rust toolchain](https://www.rust-lang.org/tools/install)
-installed on your system.
-You can check that your system is ready with the commands below.
-Note that all the Flutter subcomponents should be installed.
-
-```shell
-rustc --version
-flutter doctor
-```
-
-You also need to have the CLI tool for Rinf ready.
+You need the [Flutter SDK](https://docs.flutter.dev/get-started/install), the
+[Rust toolchain](https://www.rust-lang.org/tools/install) (1.85 or newer) and
+the CLI for [Rinf](https://rinf.cunarist.org), the Dart–Rust bridge:
 
 ```shell
 cargo install rinf_cli
-```
-
-Signals sent between Dart and Rust are implemented using signal attributes.
-If you've modified the signal structs, run the following command
-to generate the corresponding Dart classes:
-
-```shell
-rinf gen
-```
-
-Now you can run and build this app just like any other Flutter projects.
-
-```shell
+rinf gen        # generate the Dart bindings for the Rust signals
 flutter run
 ```
 
-For detailed instructions on writing Rust and Flutter together,
-please refer to Rinf's [documentation](https://rinf.cunarist.org).
+Run the tests with `cargo test` and `flutter test`. `AGENTS.md` describes the
+project layout and the code format in detail.
+
+## License
+
+tricode is released under the [MIT License](LICENSE).
+
+The bundled fonts in `assets/fonts/` (Bebas Neue, Caveat, JetBrains Mono, Lora,
+Pacifico) are under the SIL Open Font License 1.1; each folder holds its
+`OFL.txt`. Third-party Dart and Rust dependencies keep their own licenses.

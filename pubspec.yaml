@@ -1,5 +1,5 @@
 name: tricode_app
-description: "A new Flutter project."
+description: "Encode and decode text in triangle-grid codes."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -33,8 +33,8 @@ dependencies:
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
-  cupertino_icons: ^1.0.8
-  rinf: ^8.10.0
+  cupertino_icons: ^2.0.0
+  rinf: ^8.11.0
   meta: ^1.17.0
   tuple: ^2.0.2
   file_selector: ^1.0.3
@@ -42,6 +42,7 @@ dependencies:
   url_launcher: ^6.3.1
   flutter_colorpicker: ^1.1.0
   super_clipboard: ^0.9.1
+  logging: ^1.3.0
 
 dev_dependencies:
   flutter_test:
@@ -53,6 +54,14 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+
+# jni (via path_provider_android) builds on Linux too, and 1.0.3+ pass a
+# `JNIEnv **` where its bundled jni.h wants `void **`, which current clang
+# rejects (-Wincompatible-pointer-types). 1.0.0 still has the cast; drop both
+# pins once a fixed jni is out.
+dependency_overrides:
+  jni: 1.0.0
+  jni_flutter: 1.0.1 # 1.0.4 asserts jni ^1.1.0
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
