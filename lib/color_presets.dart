@@ -16,8 +16,8 @@ class ColorPreset {
 /// Suggested the first time the Horizon style is picked.
 const zeroDawnPreset = ColorPreset(
   'Zero Dawn',
-  Color(0xFF90ADD3),
-  Color(0xFFC0CAD7),
+  Color(0xFF4a97dd),
+  Color(0xFF90c2e3),
 );
 
 /// The two colours of a preset must differ in brightness by at least

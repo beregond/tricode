@@ -15,7 +15,7 @@ Future<void> main() async {
 }
 
 /// The app's brand colour; both colour schemes are generated from it.
-const _primaryColor = Color(0xFF90add3);
+const _primaryColor = Color(0xFF4a97dd);
 
 /// A colour scheme generated from [_primaryColor], keeping it as the exact primary colour.
 ColorScheme _colorScheme(Brightness brightness) => ColorScheme.fromSeed(
