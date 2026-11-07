@@ -1,5 +1,3 @@
-import 'dart:math';
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
@@ -93,56 +91,24 @@ class _HomePageState extends State<HomePage>
   }
 }
 
-/// The app logo, as in `assets/logo/tricode.svg`: a triangle split at its edge
-/// midpoints with the middle one cut out, drawn in the SVG's dark grey in both
-/// themes.
+/// The app logo: `assets/logo/tricode.png`, rendered from `assets/logo/tricode.svg`
+/// by `tricode-regen-icons`. A bitmap scaled down with mipmaps keeps the edges
+/// smooth where a painted path can come out jagged (Impeller on Linux draws
+/// paths without anti-aliasing).
 class TricodeLogo extends StatelessWidget {
   const TricodeLogo({super.key, this.size = 24});
-
-  /// The logo's fill in `assets/logo/tricode.svg`.
-  static const color = Color(0xFF1A1A1A);
 
   final double size;
 
   @override
   Widget build(BuildContext context) {
-    return CustomPaint(
-      size: Size.square(size),
-      painter: _TricodeLogoPainter(color),
+    return Image.asset(
+      'assets/logo/tricode.png',
+      width: size,
+      height: size,
+      filterQuality: FilterQuality.medium,
     );
   }
-}
-
-class _TricodeLogoPainter extends CustomPainter {
-  _TricodeLogoPainter(this.color);
-
-  final Color color;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final w = size.width;
-    final h = w * sqrt(3) / 2;
-    final top = (size.height - h) / 2;
-    final bottom = top + h;
-    final middle = top + h / 2;
-    final path = Path()
-      ..fillType = PathFillType.evenOdd
-      ..addPolygon([
-        Offset(w / 2, top),
-        Offset(w, bottom),
-        Offset(0, bottom),
-      ], true)
-      ..addPolygon([
-        Offset(w / 4, middle),
-        Offset(w * 3 / 4, middle),
-        Offset(w / 2, bottom),
-      ], true);
-    canvas.drawPath(path, Paint()..color = color);
-  }
-
-  @override
-  bool shouldRepaint(_TricodeLogoPainter oldDelegate) =>
-      color != oldDelegate.color;
 }
 
 /// The theme, and debug info on or off.
@@ -172,33 +138,30 @@ class _SettingsDialogState extends State<_SettingsDialog> {
         children: [
           const Text('Theme'),
           const SizedBox(height: 8),
+          // One row per mode, rather than segmented buttons, so it fits the
+          // narrow dialog on a phone.
           ValueListenableBuilder(
             valueListenable: themeMode,
-            builder: (context, mode, _) => SegmentedButton<ThemeMode>(
-              segments: const [
-                ButtonSegment(
-                  value: ThemeMode.system,
-                  icon: Icon(Icons.brightness_auto),
-                  label: Text('System'),
-                ),
-                ButtonSegment(
-                  value: ThemeMode.light,
-                  icon: Icon(Icons.light_mode),
-                  label: Text('Light'),
-                ),
-                ButtonSegment(
-                  value: ThemeMode.dark,
-                  icon: Icon(Icons.dark_mode),
-                  label: Text('Dark'),
-                ),
-              ],
-              selected: {mode},
-              onSelectionChanged: (selection) =>
-                  themeMode.value = selection.first,
+            builder: (context, mode, _) => RadioGroup<ThemeMode>(
+              groupValue: mode,
+              onChanged: (value) => themeMode.value = value ?? mode,
+              child: const Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _ThemeOption(
+                    ThemeMode.system,
+                    Icons.brightness_auto,
+                    'System',
+                  ),
+                  _ThemeOption(ThemeMode.light, Icons.light_mode, 'Light'),
+                  _ThemeOption(ThemeMode.dark, Icons.dark_mode, 'Dark'),
+                ],
+              ),
             ),
           ),
-          const SizedBox(height: 16),
+          const Divider(height: 24),
           CheckboxListTile(
+            contentPadding: EdgeInsets.zero,
             title: const Text('Debug Mode'),
             value: _showDebugInfo,
             onChanged: (value) {
@@ -214,6 +177,26 @@ class _SettingsDialogState extends State<_SettingsDialog> {
           child: const Text('Close'),
         ),
       ],
+    );
+  }
+}
+
+/// A theme mode's row in the settings dialog.
+class _ThemeOption extends StatelessWidget {
+  const _ThemeOption(this.mode, this.icon, this.label);
+
+  final ThemeMode mode;
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return RadioListTile<ThemeMode>(
+      value: mode,
+      contentPadding: EdgeInsets.zero,
+      dense: true,
+      title: Text(label),
+      secondary: Icon(icon),
     );
   }
 }

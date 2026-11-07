@@ -1,6 +1,6 @@
 {
-    "name": "tricode_app",
-    "short_name": "tricode_app",
+    "name": "Tricode",
+    "short_name": "Tricode",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",

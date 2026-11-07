@@ -38,16 +38,6 @@ impl EccLevel {
         }
     }
 
-    /// 0 = Low, 1 = Medium, 2 = Quartile, 3 = High; anything else is Medium.
-    pub fn from_u32(value: u32) -> Self {
-        match value {
-            0 => EccLevel::Low,
-            2 => EccLevel::Quartile,
-            3 => EccLevel::High,
-            _ => EccLevel::Medium,
-        }
-    }
-
     /// Largest share of the code's area an [`Overlay`] may take at this level. These are the
     /// solid covers `survives_a_covered_centre` checks, so a code with an overlay this large still
     /// decodes.

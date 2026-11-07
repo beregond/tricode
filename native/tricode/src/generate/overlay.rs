@@ -2,8 +2,10 @@
 //! correction repairs them.
 
 use super::geometry::TriangleGrid;
+use super::render::Shape;
 use crate::frame::EccLevel;
-use image::{ImageFormat, ImageReader, Rgba, RgbaImage};
+use image::imageops::FilterType;
+use image::{ImageFormat, ImageReader, Rgba, Rgba32FImage, RgbaImage};
 use std::io::Cursor;
 
 /// An image drawn over the centre of a code, such as a logo or a line of text. The triangles under
@@ -28,7 +30,7 @@ pub(crate) fn load_overlay(
     let max_share = level.max_overlay_share();
     if !(overlay.share > 0.0 && overlay.share <= max_share) {
         return Err(format!(
-            "Overlay must take between 0% and {:.0}% of a {} level code, got {:.1}%",
+            "The logo must take between 0% and {:.0}% of a {} level code, got {:.1}%",
             max_share * 100.0,
             level.name(),
             overlay.share * 100.0
@@ -37,17 +39,17 @@ pub(crate) fn load_overlay(
     let reader = ImageReader::with_format(Cursor::new(overlay.png), ImageFormat::Png);
     let (w, h) = reader
         .into_dimensions()
-        .map_err(|e| format!("Failed to read overlay image: {}", e))?;
+        .map_err(|e| format!("Failed to read the logo image: {}", e))?;
     if w as u64 * h as u64 > MAX_OVERLAY_PIXELS {
         return Err(format!(
-            "Overlay image of {}×{} px is larger than {} MP",
+            "The logo image of {}×{} px is larger than {} MP",
             w,
             h,
             MAX_OVERLAY_PIXELS / 1_000_000
         ));
     }
     let image = image::load_from_memory_with_format(overlay.png, ImageFormat::Png)
-        .map_err(|e| format!("Failed to read overlay image: {}", e))?
+        .map_err(|e| format!("Failed to read the logo image: {}", e))?
         .to_rgba8();
     Ok((image, overlay.share))
 }
@@ -84,7 +86,7 @@ pub(crate) fn overlay_box(image: &RgbaImage, share: f64, width: u32, height: u32
 /// Leaves out every cell whose triangle reaches into the box, so whole triangles disappear rather
 /// than being cut, and borders run around the gap like around any other background.
 pub(crate) fn clear_cells_under(
-    shapes: &mut [Vec<Option<usize>>],
+    shapes: &mut [Vec<Option<Shape>>],
     grid: &TriangleGrid,
     area: &PixelBox,
 ) {
@@ -126,7 +128,7 @@ pub(crate) fn draw_overlay(
         ((image.width() as f64 * scale).round() as u32).max(1),
         ((image.height() as f64 * scale).round() as u32).max(1),
     );
-    let scaled = image::imageops::resize(image, w, h, image::imageops::FilterType::Lanczos3);
+    let scaled = resize_premultiplied(image, w, h);
     let x0 = ((area.left + area.right - w as f64) / 2.0).round() as u32;
     let y0 = ((area.top + area.bottom - h as f64) / 2.0).round() as u32;
     for (x, y, src) in scaled.enumerate_pixels() {
@@ -138,8 +140,39 @@ pub(crate) fn draw_overlay(
     }
 }
 
+/// Resizes `image` with its colours premultiplied by alpha. Straight alpha would blend the colour
+/// of fully transparent pixels (usually black) into the edges, leaving a dark fringe around light
+/// ink such as a white text outline. The triangle filter (an area average when shrinking) never
+/// overshoots, unlike Lanczos, whose ringing draws faint light and dark lines along sharp edges,
+/// such as an outline in the background colour.
+fn resize_premultiplied(image: &RgbaImage, w: u32, h: u32) -> RgbaImage {
+    let premultiplied = Rgba32FImage::from_fn(image.width(), image.height(), |x, y| {
+        let [r, g, b, a] = image.get_pixel(x, y).0.map(|c| c as f32 / 255.0);
+        Rgba([r * a, g * a, b * a, a])
+    });
+    let scaled = image::imageops::resize(&premultiplied, w, h, FilterType::Triangle);
+    RgbaImage::from_fn(w, h, |x, y| {
+        // Clamped against rounding only.
+        let [r, g, b, a] = scaled.get_pixel(x, y).0;
+        let a = a.clamp(0.0, 1.0);
+        let channel = |c: f32| {
+            if a == 0.0 {
+                0
+            } else {
+                ((c / a).clamp(0.0, 1.0) * 255.0).round() as u8
+            }
+        };
+        Rgba([
+            channel(r),
+            channel(g),
+            channel(b),
+            (a * 255.0).round() as u8,
+        ])
+    })
+}
+
 /// Porter-Duff "over": `src` composited on top of `dst`, both with straight alpha.
-fn over(src: Rgba<u8>, dst: Rgba<u8>) -> Rgba<u8> {
+pub(crate) fn over(src: Rgba<u8>, dst: Rgba<u8>) -> Rgba<u8> {
     let (sa, da) = (src[3] as f64 / 255.0, dst[3] as f64 / 255.0);
     let out_a = sa + da * (1.0 - sa);
     if out_a == 0.0 {
@@ -153,4 +186,54 @@ fn over(src: Rgba<u8>, dst: Rgba<u8>) -> Rgba<u8> {
         channel(2),
         (out_a * 255.0).round() as u8,
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// White ink on transparent black pixels, as Flutter renders a white text outline, stays white
+    /// at its scaled edges instead of picking up a dark fringe.
+    #[test]
+    fn scaling_keeps_light_edges_light() {
+        let image = RgbaImage::from_fn(97, 97, |x, y| {
+            let d = ((x as f64 - 48.0).powi(2) + (y as f64 - 48.0).powi(2)).sqrt();
+            if (20.0..30.0).contains(&d) {
+                Rgba([255, 255, 255, 255])
+            } else {
+                Rgba([0, 0, 0, 0])
+            }
+        });
+        for size in [31, 160] {
+            let scaled = resize_premultiplied(&image, size, size);
+            let darkest = scaled
+                .pixels()
+                .filter(|p| p[3] > 0)
+                .map(|p| p[0].min(p[1]).min(p[2]))
+                .min();
+            assert_eq!(darkest, Some(255), "{size} px");
+        }
+    }
+
+    /// A sharp edge between two opaque colours scales to values between them, with no ring
+    /// lighter or darker than either.
+    #[test]
+    fn scaling_does_not_ring() {
+        let image = RgbaImage::from_fn(90, 90, |x, _| {
+            if x < 45 {
+                Rgba([40, 80, 200, 255])
+            } else {
+                Rgba([150, 190, 230, 255])
+            }
+        });
+        for size in [29, 61, 140] {
+            let scaled = resize_premultiplied(&image, size, size);
+            for p in scaled.pixels() {
+                assert!(
+                    (40..=150).contains(&p[0]) && p[3] == 255,
+                    "{size} px: {p:?}"
+                );
+            }
+        }
+    }
 }

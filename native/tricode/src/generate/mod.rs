@@ -4,6 +4,7 @@ mod geometry;
 mod horizon;
 mod overlay;
 mod render;
+mod shade;
 
 use crate::decode::{MIN_LUMA_GAP, decode_image};
 use crate::frame::{EccLevel, encode_frame};
@@ -17,31 +18,22 @@ use crate::png::encode_png;
 use geometry::TriangleGrid;
 use horizon::HorizonLayout;
 use image::{Rgba, RgbaImage};
-use overlay::{clear_cells_under, draw_overlay, load_overlay, overlay_box};
+use overlay::{clear_cells_under, draw_overlay, load_overlay, over, overlay_box};
 use render::{border_width, cell_shapes, paint_shapes};
+use shade::cell_colours;
+use std::time::SystemTime;
 
 pub use overlay::{MAX_OVERLAY_PIXELS, Overlay};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageStyle {
-    /// Black triangles with a 1-pixel gap (border excluded) between neighbours.
+    /// Triangles with a 1-pixel gap (border excluded) between neighbours.
     Tiles,
-    /// Black triangles filled edge-to-edge with no gap.
+    /// Triangles filled edge-to-edge with no gap.
     Stain,
-    /// Foreground triangles joined into diagonal groups, each drawn as one shape with a border
-    /// around it (see [`HorizonLayout`]).
+    /// Triangles of the same colour joined into diagonal groups, each drawn as one shape with a
+    /// border around it (see [`HorizonLayout`]).
     Horizon,
-}
-
-impl ImageStyle {
-    /// 0 = Tiles, 1 = Stain, 2 = Horizon; anything else is Tiles.
-    pub fn from_u32(v: u32) -> Self {
-        match v {
-            1 => Self::Stain,
-            2 => Self::Horizon,
-            _ => Self::Tiles,
-        }
-    }
 }
 
 /// Parameters for [`generate_image_debug`].
@@ -51,12 +43,21 @@ pub struct GenerateImageParams<'a> {
     pub width_ratio: u32,
     pub height_ratio: u32,
     pub style: ImageStyle,
-    /// Triangle colour, as ARGB (`0xAARRGGBB`); always drawn opaque.
-    pub fg_color: u32,
-    /// Background colour, as ARGB (`0xAARRGGBB`); may be transparent.
+    /// Colour of the primary triangles (bit 1), as ARGB (`0xAARRGGBB`); always drawn opaque.
+    pub primary_color: u32,
+    /// Colour of the secondary triangles (bit 0), as ARGB; drawn over the background, so a
+    /// translucent one tints it and a transparent one leaves it showing. Usually the background
+    /// colour, which looks as if only the primary triangles were drawn.
+    pub secondary_color: u32,
+    /// Colour of the margin and the borders between shapes, as ARGB; may be transparent.
     pub bg_color: u32,
-    /// Seed of the Horizon grouping; 0 picks one from the clock.
-    pub horizon_seed: u64,
+    /// Seed of the Horizon grouping and of colour variance; 0 picks one from the clock.
+    pub seed: u64,
+    /// Shifts every primary shape's colour a little in brightness (see [`shade`]), picked by
+    /// `seed`.
+    pub primary_variance: bool,
+    /// The same for the secondary shapes.
+    pub secondary_variance: bool,
     /// Index into [`crate::MASK_NAMES`] of the mask to XOR the data with, for comparing masks.
     /// `None` (or an out-of-range index) picks the best one, as normal generation does.
     pub mask: Option<usize>,
@@ -98,16 +99,17 @@ pub fn generate_image_debug(params: GenerateImageParams<'_>) -> Result<GenerateD
 /// Reads a generated code back and says why it doesn't decode, if it doesn't. Colours the
 /// decoder can't tell apart are caught first, which skips a slow decode that is bound to fail.
 fn decode_warning(png: &[u8], params: &GenerateImageParams<'_>) -> Option<String> {
-    // Converted exactly as the decoder converts the image.
-    let luma = |argb| {
-        let pixel = RgbaImage::from_pixel(1, 1, argb_to_rgba(argb, true));
+    // Converted exactly as the decoder converts the image, which ignores alpha.
+    let luma = |Rgba([r, g, b, _]): Rgba<u8>| {
+        let pixel = RgbaImage::from_pixel(1, 1, Rgba([r, g, b, 255]));
         image::DynamicImage::ImageRgba8(pixel).to_luma8()[(0, 0)][0]
     };
-    let (fg, bg) = (luma(params.fg_color), luma(params.bg_color));
-    if fg.abs_diff(bg) < MIN_LUMA_GAP {
+    let [primary, secondary, bg] = code_colours(params);
+    let (primary, secondary) = (luma(primary), luma(over(secondary, bg)));
+    if primary.abs_diff(secondary) < MIN_LUMA_GAP {
         return Some(format!(
-            "The triangle and background colours are too close in brightness to tell apart \
-             ({fg} and {bg} of 255; they need to be at least {MIN_LUMA_GAP} apart)."
+            "The primary and secondary triangle colors are too close in brightness to tell apart \
+             ({primary} and {secondary} of 255; they need to be at least {MIN_LUMA_GAP} apart)."
         ));
     }
     let decodes = decode_image(png).is_ok_and(|d| d.text.as_deref() == Some(params.payload));
@@ -115,12 +117,33 @@ fn decode_warning(png: &[u8], params: &GenerateImageParams<'_>) -> Option<String
         (true, _) => None,
         // The overlay's share is kept within what the level repairs, but what it covers varies.
         (false, true) => Some(
-            "This code doesn't decode with its overlay. Make the overlay smaller or raise the \
+            "This code doesn't decode with its logo. Make the logo smaller or raise the \
              error correction."
                 .to_string(),
         ),
         (false, false) => Some("This code doesn't decode.".to_string()),
     }
+}
+
+/// The primary, secondary and background colours; the secondary is drawn composited over the
+/// background.
+fn code_colours(params: &GenerateImageParams<'_>) -> [Rgba<u8>; 3] {
+    [
+        argb_to_rgba(params.primary_color, true),
+        argb_to_rgba(params.secondary_color, false),
+        argb_to_rgba(params.bg_color, false),
+    ]
+}
+
+/// `seed`, or the current unix-time seconds for 0.
+fn resolve_seed(seed: u64) -> u64 {
+    if seed != 0 {
+        return seed;
+    }
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(42)
 }
 
 /// Convert a Flutter/Android-style ARGB `u32` (`0xAARRGGBB`) to an `Rgba<u8>`.
@@ -181,8 +204,8 @@ pub(crate) fn create_image_from_payload(
     payload: &[u8],
     params: &GenerateImageParams<'_>,
 ) -> Result<GenerateDebug, String> {
-    let fg = argb_to_rgba(params.fg_color, true);
-    let bg = argb_to_rgba(params.bg_color, false);
+    let colours = code_colours(params);
+    let seed = resolve_seed(params.seed);
     let overlay = params
         .overlay
         .map(|overlay| load_overlay(overlay, params.ecc_level))
@@ -192,9 +215,14 @@ pub(crate) fn create_image_from_payload(
 
     let cells = layout_cells(&grid_data.data, rows, cols);
     let (colour_transitions, shared_edges) = colour_transitions(&cells);
-    let horizon_layout = (params.style == ImageStyle::Horizon)
-        .then(|| HorizonLayout::from_seed(rows, cols, params.horizon_seed, &grid_data.data));
-    let mut shapes = cell_shapes(&cells, params.style, horizon_layout.as_ref());
+    let horizon_layouts = (params.style == ImageStyle::Horizon).then(|| {
+        let secondary_cells: Vec<Vec<bool>> = cells
+            .iter()
+            .map(|row| row.iter().map(|&primary| !primary).collect())
+            .collect();
+        [&cells, &secondary_cells].map(|members| HorizonLayout::from_seed(seed, members))
+    });
+    let mut shapes = cell_shapes(&cells, params.style, horizon_layouts.as_ref());
 
     let (width, height) = image_size(cols, rows, params.triangle_width);
     let grid = TriangleGrid::new(rows, cols, params.triangle_width);
@@ -204,9 +232,12 @@ pub(crate) fn create_image_from_payload(
         (image, area)
     });
 
+    let bg = colours[2];
+    let vary = [params.primary_variance, params.secondary_variance];
+    let cell_colours = cell_colours(&shapes, colours, seed, vary);
     let mut img = RgbaImage::from_pixel(width, height, bg);
     let border = border_width(params.style, params.triangle_width);
-    paint_shapes(&mut img, &grid, &shapes, border, fg, bg);
+    paint_shapes(&mut img, &grid, &shapes, border, &cell_colours, bg);
     if let Some((image, area)) = &overlay {
         draw_overlay(&mut img, image, area, params.triangle_width);
     }

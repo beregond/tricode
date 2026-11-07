@@ -2,6 +2,8 @@
 /// crate (native/tricode/src); keep them in sync.
 library;
 
+import 'src/bindings/bindings.dart';
+
 /// Data masks the generator can XOR the payload with, in the same order as
 /// `MASK_NAMES` / `MASKS` in native/tricode/src/mask.rs (the index is sent to
 /// Rust).
@@ -40,25 +42,23 @@ String? triangleWidthError(String text) {
   return null;
 }
 
-/// Error-correction levels, indexed as `SmallText.eccLevel` expects, with how
-/// much of the code each survives being damaged.
-const eccLevelNames = [
-  'Low (~7% damage)',
-  'Medium (~15% damage)',
-  'Quartile (~25% damage)',
-  'High (~30% damage)',
-];
+extension EccLevelLabel on EccLevel {
+  /// The level's name, with how much of the code it survives being damaged.
+  String get label => switch (this) {
+    EccLevel.low => 'Low (~7% damage)',
+    EccLevel.medium => 'Medium (~15% damage)',
+    EccLevel.quartile => 'Quartile (~25% damage)',
+    EccLevel.high => 'High (~30% damage)',
+  };
+}
 
-/// The level codes are generated at by default: Medium.
-const defaultEccLevel = 1;
+/// The level codes are generated at by default, as `DEFAULT_ECC_LEVEL`.
+const defaultEccLevel = EccLevel.medium;
 
-/// Code styles, indexed as `SmallText.style` expects.
-enum CodeStyle {
-  tiles('Tiles'),
-  stain('Stain'),
-  horizon('Horizon');
-
-  const CodeStyle(this.label);
-
-  final String label;
+extension CodeStyleLabel on CodeStyle {
+  String get label => switch (this) {
+    CodeStyle.tiles => 'Tiles',
+    CodeStyle.stain => 'Stain',
+    CodeStyle.horizon => 'Horizon',
+  };
 }

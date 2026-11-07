@@ -64,7 +64,7 @@ void main() {
               font: font,
               bold: bold,
               italic: italic,
-              outline: outline,
+              outlineColor: outline ? Colors.white : null,
             ),
           );
           final (width, height, alpha) = await _alpha(png);
@@ -99,18 +99,25 @@ void main() {
     });
   });
 
-  testWidgets('outlined text covers less than filled text', (tester) async {
+  testWidgets('an outline widens the text, and hollow text covers less', (
+    tester,
+  ) async {
     await tester.runAsync(() async {
-      Future<int> inked(bool outline) async {
+      Future<int> inked(Color color, Color? outlineColor) async {
         final png = await textToOverlayPng(
           'O',
-          OverlayTextStyle(color: Colors.black, outline: outline),
+          OverlayTextStyle(color: color, outlineColor: outlineColor),
         );
         final (_, _, alpha) = await _alpha(png);
         return alpha.where((a) => a > 128).length;
       }
 
-      expect(await inked(true), lessThan(await inked(false) * 0.8));
+      final filled = await inked(Colors.black, null);
+      expect(await inked(Colors.black, Colors.white), greaterThan(filled));
+      expect(
+        await inked(Colors.transparent, Colors.white),
+        lessThan(filled * 0.8),
+      );
     });
   });
 

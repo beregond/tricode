@@ -1,4 +1,4 @@
-use rinf::{DartSignal, RustSignal};
+use rinf::{DartSignal, RustSignal, SignalPiece};
 use serde::{Deserialize, Serialize};
 
 /// To send data from Dart to Rust, use `DartSignal`.
@@ -7,31 +7,64 @@ pub struct SmallText {
     pub text: String,
     pub width_ratio: u32,
     pub height_ratio: u32,
-    /// 0 = Tiles, 1 = Stain, 2 = Horizon
-    pub style: u32,
-    /// "text", "url", or "plain"
-    pub payload_type: String,
-    /// Foreground (triangle) color — ARGB u32, alpha is ignored (always fully opaque)
-    pub fg_color: u32,
-    /// Background color — ARGB u32, alpha 0 means fully transparent
+    pub style: CodeStyle,
+    pub payload_type: PayloadType,
+    /// Color of the primary triangles (bit 1) — ARGB u32, alpha is ignored (always fully opaque)
+    pub primary_color: u32,
+    /// Color of the secondary triangles (bit 0) — ARGB u32, alpha 0 means fully transparent
+    pub secondary_color: u32,
+    /// Background (margin and borders) color — ARGB u32, alpha 0 means fully transparent
     pub bg_color: u32,
-    /// Seed controlling the Horizon style layout; 0 means "use current unix time"
-    pub horizon_seed: u64,
+    /// Seed of the Horizon style layout and of colour variance; 0 means "use current unix time"
+    pub seed: u64,
+    /// Shift every primary shape's colour a little in brightness, picked by `seed`
+    pub primary_variance: bool,
+    /// The same for the secondary shapes
+    pub secondary_variance: bool,
     /// Debug: index into `tricode::MASK_NAMES` of the mask to XOR the data with;
     /// `None` picks the most balanced mask, as normal generation does
     pub mask: Option<u32>,
     /// Triangle base width in pixels: odd, between `tricode::MIN_TRIANGLE_WIDTH` and
     /// `tricode::MAX_TRIANGLE_WIDTH`; `tricode::DEFAULT_TRIANGLE_WIDTH` normally
     pub triangle_width: u32,
-    /// Error correction: 0 = Low (~7% of the code can be damaged), 1 = Medium (~15%),
-    /// 2 = Quartile (~25%), 3 = High (~30%). Higher levels make the grid larger.
-    pub ecc_level: u32,
+    /// Higher levels make the grid larger.
+    pub ecc_level: EccLevel,
     /// PNG bytes of an image drawn over the centre of the code (a logo, or text rendered by
     /// Dart); empty for none
     pub overlay_png: Vec<u8>,
     /// Share of the code's area the overlay takes: above 0 and at most
     /// `tricode::EccLevel::max_overlay_share` of the level; ignored without an overlay
     pub overlay_share: f64,
+}
+
+/// How the code's triangles are drawn; mirrors `tricode::ImageStyle`.
+#[derive(Deserialize, SignalPiece, Clone, Copy)]
+pub enum CodeStyle {
+    Tiles,
+    Stain,
+    Horizon,
+}
+
+/// What the payload holds, stored as the envelope's `type`.
+#[derive(Deserialize, SignalPiece, Clone, Copy)]
+pub enum PayloadType {
+    Text,
+    Url,
+    /// Offered only with debug info on
+    Plain,
+}
+
+/// Error correction; mirrors `tricode::EccLevel`.
+#[derive(Deserialize, SignalPiece, Clone, Copy)]
+pub enum EccLevel {
+    /// ~7% of the code can be damaged
+    Low,
+    /// ~15%
+    Medium,
+    /// ~25%
+    Quartile,
+    /// ~30%
+    High,
 }
 
 /// Image bytes to be decoded.

@@ -4,8 +4,12 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Tricode uses the camera to photograph codes and decode them.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Tricode saves downloaded codes to your photo library.</string>
 	<key>CFBundleDisplayName</key>
-	<string>Tricode App</string>
+	<string>Tricode</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -13,7 +17,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>tricode_app</string>
+	<string>Tricode</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

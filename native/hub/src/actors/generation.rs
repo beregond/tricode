@@ -1,4 +1,4 @@
-use crate::signals::{GeneratedImage, SmallText};
+use crate::signals::{CodeStyle, EccLevel, GeneratedImage, PayloadType, SmallText};
 use async_trait::async_trait;
 use messages::prelude::{Actor, Address, Context, Notifiable};
 use rinf::{DartSignal, RustSignal};
@@ -45,20 +45,55 @@ impl Notifiable<SmallText> for GenerationActor {
     }
 }
 
+impl From<CodeStyle> for tricode::ImageStyle {
+    fn from(style: CodeStyle) -> Self {
+        match style {
+            CodeStyle::Tiles => Self::Tiles,
+            CodeStyle::Stain => Self::Stain,
+            CodeStyle::Horizon => Self::Horizon,
+        }
+    }
+}
+
+impl From<EccLevel> for tricode::EccLevel {
+    fn from(level: EccLevel) -> Self {
+        match level {
+            EccLevel::Low => Self::Low,
+            EccLevel::Medium => Self::Medium,
+            EccLevel::Quartile => Self::Quartile,
+            EccLevel::High => Self::High,
+        }
+    }
+}
+
+impl From<PayloadType> for &'static str {
+    /// The envelope's `type`, as `tricode::GenerateImageParams::payload_type` takes it.
+    fn from(kind: PayloadType) -> Self {
+        match kind {
+            PayloadType::Text => "text",
+            PayloadType::Url => "url",
+            PayloadType::Plain => "plain",
+        }
+    }
+}
+
 /// Generates the code `msg` asks for, as the signal to send back.
 fn generate(msg: &SmallText) -> GeneratedImage {
     let result = tricode::generate_image_debug(tricode::GenerateImageParams {
         payload: &msg.text,
-        payload_type: &msg.payload_type,
+        payload_type: msg.payload_type.into(),
         width_ratio: msg.width_ratio,
         height_ratio: msg.height_ratio,
-        style: tricode::ImageStyle::from_u32(msg.style),
-        fg_color: msg.fg_color,
+        style: msg.style.into(),
+        primary_color: msg.primary_color,
+        secondary_color: msg.secondary_color,
         bg_color: msg.bg_color,
-        horizon_seed: msg.horizon_seed,
+        seed: msg.seed,
+        primary_variance: msg.primary_variance,
+        secondary_variance: msg.secondary_variance,
         mask: msg.mask.map(|m| m as usize),
         triangle_width: msg.triangle_width,
-        ecc_level: tricode::EccLevel::from_u32(msg.ecc_level),
+        ecc_level: msg.ecc_level.into(),
         overlay: (!msg.overlay_png.is_empty()).then_some(tricode::Overlay {
             png: &msg.overlay_png,
             share: msg.overlay_share,

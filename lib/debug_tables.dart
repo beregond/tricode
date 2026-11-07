@@ -54,7 +54,7 @@ class GenerateDebugTable extends StatelessWidget {
       ('Padding bits', '${result.paddingBits}'),
       ('Mask', '${result.maskName} (#${result.maskIndex})'),
       (
-        'Colour changes',
+        'Color changes',
         '${result.colourTransitions} / ${result.sharedEdges} edges'
             ' ($changeShare%)',
       ),

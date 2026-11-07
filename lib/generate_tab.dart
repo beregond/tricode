@@ -27,6 +27,9 @@ const _defaultHeightRatio = 13;
 /// How long typing in a field waits before regenerating.
 const _typingDelay = Duration(milliseconds: 500);
 
+/// Screens narrower than this (Material's compact width) are phone-sized.
+const _compactWidth = 600.0;
+
 /// Generates codes. Its input is cleared when the user leaves the tab, which
 /// [tabController] tells it about; [tabIndex] is its own index there.
 class GenerateTab extends StatefulWidget {
@@ -57,7 +60,7 @@ class _GenerateTabState extends State<GenerateTab>
   final _heightRatioController = TextEditingController(
     text: '$_defaultHeightRatio',
   );
-  final _horizonSeedController = TextEditingController(
+  final _seedController = TextEditingController(
     text: (DateTime.now().millisecondsSinceEpoch ~/ 1000).toString(),
   );
   final _triangleWidthController = TextEditingController(
@@ -69,11 +72,15 @@ class _GenerateTabState extends State<GenerateTab>
   StreamSubscription<RustSignalPack<GeneratedImage>>? _generatedImageSub;
 
   // Options.
-  String _payloadType = 'text';
+  PayloadType _payloadType = PayloadType.text;
   CodeStyle _style = CodeStyle.tiles;
-  Color _fgColor = Colors.black;
+  Color _primaryColor = Colors.black; // triangles for bit 1
+  Color _secondaryColor = Colors.white; // triangles for bit 0
   Color _bgColor = Colors.white;
-  int _eccLevel = defaultEccLevel;
+  // Shapes of each colour shaded slightly apart, by the seed.
+  bool _primaryVariance = false;
+  bool _secondaryVariance = false;
+  EccLevel _eccLevel = defaultEccLevel;
   int _triangleWidth = defaultTriangleWidth;
   bool _customTriangleWidth = false;
   int? _mask; // null = picked by the generator; debug only
@@ -81,12 +88,15 @@ class _GenerateTabState extends State<GenerateTab>
   // What is shown.
   bool _showAdvanced = false; // options beyond the text
   bool _showPresets = false; // colour preset chips under the pickers
-  bool _horizonColoursOffered = false; // see the style selector
+  final _coloursOffered = <CodeStyle>{}; // see the style selector
+  bool _logoLevelOffered = false; // see _onLogoModeChanged
 
   // The result.
   bool _isGenerating = false;
   String? _generateError;
   _GeneratedCode? _code;
+  final _resultKey = GlobalKey(); // marks where the result starts
+  bool _revealResult = false; // scroll to the result once it arrives
   int _requestedTriangleWidth = defaultTriangleWidth; // of the pending image
 
   @override
@@ -135,7 +145,9 @@ class _GenerateTabState extends State<GenerateTab>
     super.didUpdateWidget(oldWidget);
     if (oldWidget.showDebugInfo && !widget.showDebugInfo) {
       setState(() {
-        if (_payloadType == 'plain') _payloadType = 'text';
+        if (_payloadType == PayloadType.plain) {
+          _payloadType = PayloadType.text;
+        }
         _mask = null;
       });
     }
@@ -149,7 +161,7 @@ class _GenerateTabState extends State<GenerateTab>
     _textFocusNode.dispose();
     _widthRatioController.dispose();
     _heightRatioController.dispose();
-    _horizonSeedController.dispose();
+    _seedController.dispose();
     _seedDebounce?.cancel();
     _triangleWidthController.dispose();
     _triangleWidthDebounce?.cancel();
@@ -185,8 +197,11 @@ class _GenerateTabState extends State<GenerateTab>
       _mask = null;
       _triangleWidth = defaultTriangleWidth;
       _customTriangleWidth = false;
-      _fgColor = Colors.black;
+      _primaryColor = Colors.black;
+      _secondaryColor = Colors.white;
       _bgColor = Colors.white;
+      _primaryVariance = false;
+      _secondaryVariance = false;
     });
   }
 
@@ -198,6 +213,7 @@ class _GenerateTabState extends State<GenerateTab>
         _isGenerating = false;
         _generateError = message.error;
       });
+      _scrollToResult();
       return;
     }
     final png = Uint8List.fromList(message.pngBytes);
@@ -213,6 +229,23 @@ class _GenerateTabState extends State<GenerateTab>
       );
       _isGenerating = false;
       _generateError = null;
+    });
+    _scrollToResult();
+  }
+
+  /// Scrolls the result to the top of the tab, if the Generate button asked
+  /// for it: on a phone it would otherwise land under the keyboard.
+  void _scrollToResult() {
+    if (!_revealResult) return;
+    _revealResult = false;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final context = _resultKey.currentContext;
+      if (context == null) return;
+      Scrollable.ensureVisible(
+        context,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOut,
+      );
     });
   }
 
@@ -240,14 +273,15 @@ class _GenerateTabState extends State<GenerateTab>
 
     final Uint8List overlayPng;
     try {
-      overlayPng = await _overlay.png(_fgColor);
+      overlayPng = await _overlay.png(_primaryColor, _secondaryColor);
     } catch (e, stack) {
       _log.warning('Overlay rendering failed', e, stack);
       if (!mounted) return;
       setState(() {
         _isGenerating = false;
-        _generateError = 'Failed to render the overlay: $e';
+        _generateError = 'Failed to render the logo: $e';
       });
+      _scrollToResult();
       return;
     }
 
@@ -255,19 +289,27 @@ class _GenerateTabState extends State<GenerateTab>
       text: _textController.text,
       widthRatio: _ratio(_widthRatioController, _defaultWidthRatio),
       heightRatio: _ratio(_heightRatioController, _defaultHeightRatio),
-      style: _style.index,
+      style: _style,
       payloadType: _payloadType,
-      fgColor: _fgColor.withAlpha(255).toARGB32(),
+      primaryColor: _primaryColor.withAlpha(255).toARGB32(),
+      secondaryColor: _secondaryColor.toARGB32(),
       bgColor: _bgColor.toARGB32(),
-      horizonSeed: Uint64(
-        BigInt.from(int.tryParse(_horizonSeedController.text.trim()) ?? 0),
-      ),
+      seed: Uint64(BigInt.from(int.tryParse(_seedController.text.trim()) ?? 0)),
+      primaryVariance: _primaryVariance,
+      secondaryVariance: _secondaryVariance,
       mask: widget.showDebugInfo ? _mask : null,
       triangleWidth: _triangleWidth,
       eccLevel: _eccLevel,
       overlayPng: overlayPng,
       overlayShare: _overlay.share(_eccLevel),
     ).sendSignalToRust();
+  }
+
+  /// Generates from the button: hides the keyboard and shows the result.
+  void _generateAndReveal() {
+    FocusScope.of(context).unfocus();
+    _revealResult = true;
+    _generate();
   }
 
   /// Regenerates the code with the current settings, if there is text to encode.
@@ -281,6 +323,21 @@ class _GenerateTabState extends State<GenerateTab>
     _regenerate();
   }
 
+  /// Applies [change], regenerates the code and scrolls to it once it
+  /// arrives, for choices that change the whole code (style, payload type).
+  void _changeAndReveal(VoidCallback change) {
+    setState(change);
+    _regenerateAndReveal();
+  }
+
+  /// Regenerates the code and scrolls to it once it arrives, for settings
+  /// that change the whole code (triangle size, error correction).
+  void _regenerateAndReveal() {
+    if (!_hasText) return;
+    _revealResult = true;
+    _generate();
+  }
+
   /// Regenerates once the user has stopped typing for a moment.
   Timer _regenerateLater(Timer? pending) {
     pending?.cancel();
@@ -291,6 +348,9 @@ class _GenerateTabState extends State<GenerateTab>
   Widget build(BuildContext context) {
     super.build(context);
     return SingleChildScrollView(
+      // Room to scroll the last controls clear of the system navigation bar
+      // and anything else covering the bottom of a phone screen.
+      padding: EdgeInsets.only(bottom: scrollEndPadding(context)),
       child: Column(
         children: [
           Padding(padding: const EdgeInsets.all(16.0), child: _buildText()),
@@ -311,14 +371,14 @@ class _GenerateTabState extends State<GenerateTab>
           const SizedBox(height: 8),
           if (_showAdvanced) ..._buildAdvancedOptions(),
           ElevatedButton(
-            onPressed: _hasText ? _generate : null,
+            onPressed: _hasText ? _generateAndReveal : null,
             style: ElevatedButton.styleFrom(
               minimumSize: const Size(240, 56),
               textStyle: Theme.of(context).textTheme.titleMedium,
             ),
             child: const Text('Generate'),
           ),
-          const SizedBox(height: 20),
+          SizedBox(key: _resultKey, height: 20),
           ..._buildResult(context),
         ],
       ),
@@ -341,16 +401,16 @@ class _GenerateTabState extends State<GenerateTab>
   }
 
   Widget _buildPayloadType() {
-    return SegmentedButton<String>(
+    return SegmentedButton<PayloadType>(
       segments: [
-        const ButtonSegment(value: 'text', label: Text('Text')),
-        const ButtonSegment(value: 'url', label: Text('URL')),
+        const ButtonSegment(value: PayloadType.text, label: Text('Text')),
+        const ButtonSegment(value: PayloadType.url, label: Text('URL')),
         if (widget.showDebugInfo)
-          const ButtonSegment(value: 'plain', label: Text('Plain')),
+          const ButtonSegment(value: PayloadType.plain, label: Text('Plain')),
       ],
       selected: {_payloadType},
       onSelectionChanged: (selection) =>
-          _change(() => _payloadType = selection.first),
+          _changeAndReveal(() => _payloadType = selection.first),
     );
   }
 
@@ -361,39 +421,78 @@ class _GenerateTabState extends State<GenerateTab>
           ButtonSegment(value: style, label: Text(style.label)),
       ],
       selected: {_style},
-      onSelectionChanged: (selection) => _change(() {
-        _style = selection.first;
-        // The first switch to Horizon suggests its own colours, but only over
-        // the untouched black and white default.
-        if (_style == CodeStyle.horizon && !_horizonColoursOffered) {
-          _horizonColoursOffered = true;
-          if (colorPresets.first.matches(_fgColor, _bgColor)) {
-            _fgColor = zeroDawnPreset.foreground;
-            _bgColor = zeroDawnPreset.background;
+      onSelectionChanged: (selection) {
+        String? suggestion;
+        _changeAndReveal(() {
+          _style = selection.first;
+          // The first switch to Horizon or Stain suggests the Zero Dawn colours,
+          // with colour variance on for Stain and off for Horizon, but only over
+          // the untouched black and white default.
+          final suggests =
+              _style == CodeStyle.horizon || _style == CodeStyle.stain;
+          if (suggests &&
+              _coloursOffered.add(_style) &&
+              colorPresets.first.matches(
+                _primaryColor,
+                _secondaryColor,
+                _bgColor,
+              )) {
+            _applyPreset(zeroDawnPreset);
+            if (_style == CodeStyle.stain) {
+              _primaryVariance = true;
+              _secondaryVariance = true;
+              suggestion =
+                  '${_style.label} looks best with the ${zeroDawnPreset.name} '
+                  'colors and color variance, so both are now on';
+            } else {
+              final varied = _primaryVariance || _secondaryVariance;
+              _primaryVariance = false;
+              _secondaryVariance = false;
+              suggestion = varied
+                  ? '${_style.label} looks best with the '
+                        '${zeroDawnPreset.name} colors and no color variance, '
+                        'so the colors are now on and variance is off'
+                  : '${_style.label} looks best with the '
+                        '${zeroDawnPreset.name} colors, so they are now on';
+            }
           }
-        }
-      }),
+        });
+        if (suggestion != null) showMessage(context, suggestion!);
+      },
     );
   }
 
+  void _applyPreset(ColorPreset preset) {
+    _primaryColor = preset.primary;
+    _secondaryColor = preset.secondary;
+    _bgColor = preset.background;
+  }
+
   Widget _buildColors() {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
+    return Wrap(
+      alignment: WrapAlignment.center,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      spacing: 20,
+      runSpacing: 8,
       children: [
         ColorSwatchButton(
-          label: 'Triangles',
-          color: _fgColor,
+          label: 'Primary',
+          color: _primaryColor,
           showAlpha: false,
-          onChanged: (c) => _change(() => _fgColor = c),
+          onChanged: (c) => _change(() => _primaryColor = c),
         ),
-        const SizedBox(width: 24),
+        ColorSwatchButton(
+          label: 'Secondary',
+          color: _secondaryColor,
+          showAlpha: true,
+          onChanged: (c) => _change(() => _secondaryColor = c),
+        ),
         ColorSwatchButton(
           label: 'Background',
           color: _bgColor,
           showAlpha: true,
           onChanged: (c) => _change(() => _bgColor = c),
         ),
-        const SizedBox(width: 16),
         TextButton.icon(
           onPressed: () => setState(() => _showPresets = !_showPresets),
           icon: Icon(_showPresets ? Icons.expand_less : Icons.palette),
@@ -413,37 +512,51 @@ class _GenerateTabState extends State<GenerateTab>
           ChoiceChip(
             avatar: PresetPreview(preset: preset),
             label: Text(preset.name),
-            selected: preset.matches(_fgColor, _bgColor),
-            onSelected: (_) => _change(() {
-              _fgColor = preset.foreground;
-              _bgColor = preset.background;
-            }),
+            selected: preset.matches(_primaryColor, _secondaryColor, _bgColor),
+            onSelected: (_) => _change(() => _applyPreset(preset)),
           ),
       ],
     );
   }
 
+  /// The first logo raises the error correction to high, which repairs the
+  /// most covered triangles and so allows the largest logo.
+  void _onLogoModeChanged(OverlayMode mode) {
+    String? message;
+    if (mode != OverlayMode.none && !_logoLevelOffered) {
+      _logoLevelOffered = true;
+      if (_eccLevel != EccLevel.high) {
+        setState(() => _eccLevel = EccLevel.high);
+        message =
+            'Error correction raised to high, so the code still reads with '
+            'a logo over it';
+      }
+    }
+    _regenerate();
+    if (message != null) showMessage(context, message);
+  }
+
   List<Widget> _buildAdvancedOptions() {
     return [
-      Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16.0),
-        child: _buildAspectRatio(),
-      ),
+      _secondaryRow(_buildAspectRatio()),
       const SizedBox(height: 16),
       // How much of the code may be damaged (scratched, covered by a logo)
-      // and still decode. Higher levels enlarge the grid. Half the width, like
-      // the triangle size below.
-      FractionallySizedBox(widthFactor: 0.5, child: _buildEccLevel()),
+      // and still decode. Higher levels enlarge the grid.
+      _secondaryRow(_buildEccLevel()),
       const SizedBox(height: 16),
-      // Half the width, centred: the size rarely changes, so it shouldn't
-      // take a full row like the main inputs.
-      FractionallySizedBox(widthFactor: 0.5, child: _buildTriangleSize()),
+      _secondaryRow(_buildTriangleSize()),
+      const SizedBox(height: 16),
+      _secondaryRow(_buildColorVariance()),
+      const SizedBox(height: 16),
+      _secondaryRow(_buildSeed()),
       const SizedBox(height: 16),
       OverlayEditor(
         settings: _overlay,
         eccLevel: _eccLevel,
-        triangleColor: _fgColor,
+        primaryColor: _primaryColor,
+        secondaryColor: _secondaryColor,
         onChanged: _regenerate,
+        onModeChanged: _onLogoModeChanged,
       ),
       const SizedBox(height: 16),
       if (widget.showDebugInfo) ...[
@@ -453,12 +566,20 @@ class _GenerateTabState extends State<GenerateTab>
         ),
         const SizedBox(height: 16),
       ],
-      Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16.0),
-        child: _buildHorizonSeed(),
-      ),
-      const SizedBox(height: 16),
     ];
+  }
+
+  /// An option that rarely changes: half the width and centred, so it doesn't
+  /// take a full row like the main inputs, except on a phone-sized screen,
+  /// where half the width is too narrow for its labels.
+  Widget _secondaryRow(Widget child) {
+    if (MediaQuery.sizeOf(context).width < _compactWidth) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16.0),
+        child: child,
+      );
+    }
+    return FractionallySizedBox(widthFactor: 0.5, child: child);
   }
 
   Widget _buildAspectRatio() {
@@ -496,12 +617,14 @@ class _GenerateTabState extends State<GenerateTab>
   }
 
   Widget _buildEccLevel() {
-    return _Dropdown<int>(
+    return _Dropdown<EccLevel>(
       label: 'Error correction',
       value: _eccLevel,
-      items: [for (final (index, name) in eccLevelNames.indexed) (index, name)],
+      items: [for (final level in EccLevel.values) (level, level.label)],
       onChanged: (level) {
-        if (level != null) _change(() => _eccLevel = level);
+        if (level == null) return;
+        setState(() => _eccLevel = level);
+        _regenerateAndReveal();
       },
     );
   }
@@ -526,7 +649,7 @@ class _GenerateTabState extends State<GenerateTab>
                 if (width != null) _triangleWidth = width;
                 _triangleWidthController.text = '$_triangleWidth';
               });
-              if (width != null) _regenerate();
+              if (width != null) _regenerateAndReveal();
             },
           ),
         ),
@@ -563,28 +686,60 @@ class _GenerateTabState extends State<GenerateTab>
       label: 'Mask (debug)',
       value: _mask,
       items: [
-        (null, 'Auto (most colour changes)'),
+        (null, 'Auto (most color changes)'),
         for (final (index, name) in maskNames.indexed) (index, name),
       ],
       onChanged: (mask) => _change(() => _mask = mask),
     );
   }
 
+  /// Shifts each shape's brightness a little, picked by the seed, separately
+  /// for either colour.
+  Widget _buildColorVariance() {
+    return InputDecorator(
+      decoration: const InputDecoration(
+        labelText: 'Color variance',
+        helperText: 'Shades each shape slightly lighter',
+        border: OutlineInputBorder(),
+        contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      ),
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          FilterChip(
+            label: const Text('Primary'),
+            selected: _primaryVariance,
+            onSelected: (on) => _change(() => _primaryVariance = on),
+          ),
+          FilterChip(
+            label: const Text('Secondary'),
+            selected: _secondaryVariance,
+            onSelected: (on) => _change(() => _secondaryVariance = on),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// Always shown so the options don't jump around; only the Horizon style
-  /// uses a seed, so it's disabled for the others.
-  Widget _buildHorizonSeed() {
-    final enabled = _style == CodeStyle.horizon;
+  /// and colour variance use a seed, so it's disabled otherwise.
+  Widget _buildSeed() {
+    final enabled =
+        _style == CodeStyle.horizon || _primaryVariance || _secondaryVariance;
     return Row(
       children: [
         Expanded(
           child: TextField(
-            controller: _horizonSeedController,
+            controller: _seedController,
             enabled: enabled,
             keyboardType: TextInputType.number,
             decoration: InputDecoration(
-              labelText: 'Horizon seed',
+              labelText: 'Seed',
               hintText: 'Leave empty for current time',
-              helperText: enabled ? null : 'Only used by the Horizon style',
+              helperText: enabled
+                  ? null
+                  : 'Used by the Horizon style and color variance',
               border: const OutlineInputBorder(),
             ),
             onChanged: (_) => _seedDebounce = _regenerateLater(_seedDebounce),
@@ -595,9 +750,7 @@ class _GenerateTabState extends State<GenerateTab>
           tooltip: 'Randomize seed',
           icon: const Icon(Icons.shuffle),
           onPressed: enabled
-              ? () => _change(
-                  () => _horizonSeedController.text = '${_randomSeed()}',
-                )
+              ? () => _change(() => _seedController.text = '${_randomSeed()}')
               : null,
         ),
       ],

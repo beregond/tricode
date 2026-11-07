@@ -1,7 +1,8 @@
-//! The Horizon style: foreground cells joined into diagonal "waterfalls" drawn as single shapes.
+//! The Horizon style: cells of one colour (primary or secondary) joined into diagonal "waterfalls" drawn as
+//! single shapes.
 //!
 //! [`HorizonLayout::from_seed`] runs these steps, each a function below:
-//! 1. [`pick_candidates`]: most foreground cells may join a group, picked at random.
+//! 1. [`pick_candidates`]: most member cells may join a group, picked at random.
 //! 2. [`split_into_lanes`]: connected candidates are split along diagonal lanes into waterfalls.
 //! 3. [`cut_at_bands`]: waterfalls are cut at random band boundaries.
 //! 4. [`chain_waterfalls`]: waterfalls of opposite directions meeting end to end are joined.
@@ -10,13 +11,12 @@
 //! Every random choice comes from one hasher fed in a fixed order, so a seed always gives the same
 //! layout (the decode fixtures depend on it).
 
-use crate::grid::{layout_cells, points_down};
+use crate::grid::points_down;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::time::SystemTime;
 
-/// Chance, in percent, that a foreground cell may join a Horizon group.
+/// Chance, in percent, that a member cell may join a Horizon group.
 const HORIZON_GROUP_PERCENT: u64 = 90;
 
 /// Horizon waterfalls may be cut at every this many grid rows (before chaining).
@@ -150,15 +150,16 @@ pub(crate) struct HorizonLayout {
 }
 
 impl HorizonLayout {
-    /// Build the layout from the encoded data and grid dimensions. `seed` drives every random
-    /// choice; `0` uses the current unix-time seconds.
-    pub(crate) fn from_seed(rows: u32, cols: u32, seed: u64, encoded_data: &[u8]) -> Self {
+    /// Build the layout joining the cells flagged in `members` (the primary cells, or the
+    /// secondary ones). `seed` drives every random choice.
+    pub(crate) fn from_seed(seed: u64, members: &[Vec<bool>]) -> Self {
         let grid = CellGrid {
-            rows: rows as usize,
-            cols: cols as usize,
+            rows: members.len(),
+            cols: members.first().map_or(0, Vec::len),
         };
-        let mut hasher = seeded_hasher(seed);
-        let candidates = pick_candidates(&layout_cells(encoded_data, rows, cols), &mut hasher);
+        let mut hasher = DefaultHasher::new();
+        seed.hash(&mut hasher);
+        let candidates = pick_candidates(members, &mut hasher);
         let waterfalls = split_into_lanes(grid, &grid.connected_components(&candidates));
         let waterfalls = cut_at_bands(grid, waterfalls, &mut hasher);
         let chains = chain_waterfalls(grid, waterfalls);
@@ -173,27 +174,13 @@ impl HorizonLayout {
     }
 }
 
-fn seeded_hasher(seed: u64) -> DefaultHasher {
-    let effective_seed = if seed == 0 {
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(42)
-    } else {
-        seed
-    };
-    let mut hasher = DefaultHasher::new();
-    effective_seed.hash(&mut hasher);
-    hasher
-}
-
-/// The foreground cells that may join a group, in row-major order: each with
+/// The member cells that may join a group, in row-major order: each with
 /// [`HORIZON_GROUP_PERCENT`] probability, so most can.
-fn pick_candidates(is_fg: &[Vec<bool>], hasher: &mut DefaultHasher) -> Vec<Cell> {
+fn pick_candidates(members: &[Vec<bool>], hasher: &mut DefaultHasher) -> Vec<Cell> {
     let mut candidates = Vec::new();
-    for (row, cells) in is_fg.iter().enumerate() {
-        for (col, &fg) in cells.iter().enumerate() {
-            if fg {
+    for (row, cells) in members.iter().enumerate() {
+        for (col, &member) in cells.iter().enumerate() {
+            if member {
                 row.hash(hasher);
                 col.hash(hasher);
                 if hasher.finish() % 100 < HORIZON_GROUP_PERCENT {

@@ -1,5 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
-  <!-- Equilateral triangle split at its edge midpoints; the middle one is cut out. -->
+  <!-- Equilateral triangle split at its edge midpoints; the middle one is cut out.
+       Raised 64 px off centre: its centroid (2/3 down) makes a centred one look low. -->
   <path fill="#1a1a1a" fill-rule="evenodd"
-        d="M512 130.95 L952 893.05 L72 893.05 Z M292 512 L732 512 L512 893.05 Z"/>
+        d="M512 66.95 L952 829.05 L72 829.05 Z M292 448 L732 448 L512 829.05 Z"/>
 </svg>

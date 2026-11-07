@@ -12,7 +12,7 @@ void main() {
     // `MIN_LUMA_GAP` in native/tricode/src/decode/mod.rs.
     const minLumaGap = 24;
     for (final preset in colorPresets) {
-      final gap = (_luma(preset.foreground) - _luma(preset.background)).abs();
+      final gap = (_luma(preset.primary) - _luma(preset.secondary)).abs();
       expect(
         gap >= minLumaGap,
         isTrue,
@@ -23,10 +23,16 @@ void main() {
 
   test('presets have unique names and colours', () {
     final names = colorPresets.map((p) => p.name).toSet();
-    final pairs = colorPresets
-        .map((p) => (p.foreground.toARGB32(), p.background.toARGB32()))
+    final triples = colorPresets
+        .map(
+          (p) => (
+            p.primary.toARGB32(),
+            p.secondary.toARGB32(),
+            p.background.toARGB32(),
+          ),
+        )
         .toSet();
     expect(names.length, colorPresets.length);
-    expect(pairs.length, colorPresets.length);
+    expect(triples.length, colorPresets.length);
   });
 }

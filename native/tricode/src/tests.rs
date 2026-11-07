@@ -16,7 +16,7 @@ const RATIOS: [(u32, u32); 3] = [(1, 1), (16, 9), (3, 4)];
 const PAYLOAD_LENGTHS: [usize; 3] = [5, 40, 150];
 
 /// Generation parameters for `text` with the defaults the tests share: black Tiles on white, 1:1,
-/// default size and level, Horizon seed 42.
+/// default size and level, seed 42, no colour variance.
 pub(crate) fn params(text: &str) -> GenerateImageParams<'_> {
     GenerateImageParams {
         payload: text,
@@ -24,9 +24,12 @@ pub(crate) fn params(text: &str) -> GenerateImageParams<'_> {
         width_ratio: 1,
         height_ratio: 1,
         style: ImageStyle::Tiles,
-        fg_color: 0xFF000000,
+        primary_color: 0xFF000000,
+        secondary_color: 0xFFFFFFFF,
         bg_color: 0xFFFFFFFF,
-        horizon_seed: 42,
+        seed: 42,
+        primary_variance: false,
+        secondary_variance: false,
         mask: None,
         triangle_width: DEFAULT_TRIANGLE_WIDTH,
         ecc_level: DEFAULT_ECC_LEVEL,
@@ -317,22 +320,23 @@ fn decodes_inverted_fixtures() {
 
 #[test]
 fn warns_when_the_code_does_not_read_back() {
-    let generate_in = |fg_color, bg_color| {
+    let generate_in = |primary_color, bg_color| {
         generate_image_debug(GenerateImageParams {
-            fg_color,
+            primary_color,
+            secondary_color: bg_color,
             bg_color,
             ..params(&payload(40))
         })
         .expect("generation failed")
     };
     // Both light, both dark, and light on dark: far enough apart, so they all read.
-    for (fg, bg) in [
+    for (primary, bg) in [
         (0xFF90ADD3, 0xFFC0CAD7),
         (0xFF1B2A41, 0xFF5A6A80),
         (0xFFC0CAD7, 0xFF1E2A33),
     ] {
-        let generated = generate_in(fg, bg);
-        assert_eq!(generated.decode_warning, None, "{fg:08X} on {bg:08X}");
+        let generated = generate_in(primary, bg);
+        assert_eq!(generated.decode_warning, None, "{primary:08X} on {bg:08X}");
     }
     let warning = generate_in(0xFFB4BECB, 0xFFC0CAD7).decode_warning;
     assert!(
@@ -343,6 +347,95 @@ fn warns_when_the_code_does_not_read_back() {
     );
 }
 
+/// Secondary in their own colour, between the primary colour and the background, are drawn and
+/// still read as zeros.
+#[test]
+fn decodes_secondary_triangles_in_their_own_colour() {
+    for style in STYLES {
+        let generated = generate_image_debug(GenerateImageParams {
+            style,
+            primary_color: 0xFF1B2A41,
+            secondary_color: 0xFFB8C4D0,
+            bg_color: 0xFFFFFFFF,
+            ..params(&payload(40))
+        })
+        .expect("generation failed");
+        assert_eq!(generated.decode_warning, None, "{style:?}");
+        let img = image::load_from_memory(&generated.png_bytes)
+            .expect("load failed")
+            .to_rgba8();
+        assert!(
+            img.pixels().any(|p| p.0 == [0xB8, 0xC4, 0xD0, 0xFF]),
+            "{style:?}: no secondary triangle drawn"
+        );
+    }
+}
+
+/// A translucent secondary colour is drawn over the background rather than replacing it, and a
+/// transparent one leaves the background showing.
+#[test]
+fn draws_the_secondary_colour_over_the_background() {
+    let pixels = |secondary_color| {
+        let generated = generate_image_debug(GenerateImageParams {
+            style: ImageStyle::Stain,
+            secondary_color,
+            bg_color: 0xFF0000FF,
+            primary_color: 0xFFFFFFFF,
+            ..params(&payload(40))
+        })
+        .expect("generation failed");
+        let img = image::load_from_memory(&generated.png_bytes)
+            .expect("load failed")
+            .to_rgba8();
+        img.pixels()
+            .map(|p| p.0)
+            .collect::<std::collections::HashSet<_>>()
+    };
+    // Half-opaque red over opaque blue.
+    assert!(pixels(0x80FF0000).contains(&[0x80, 0x00, 0x7F, 0xFF]));
+    let transparent = pixels(0x00FF0000);
+    assert!(transparent.contains(&[0x00, 0x00, 0xFF, 0xFF]));
+    assert!(
+        transparent.iter().all(|p| p[3] == 0xFF),
+        "a pixel lost the background"
+    );
+}
+
+/// Colour variance shades the shapes differently, the same way for the same seed, and the code
+/// still decodes.
+#[test]
+fn colour_variance_shades_shapes_by_seed() {
+    for style in STYLES {
+        let generate_with = |seed| {
+            generate_image_debug(GenerateImageParams {
+                style,
+                seed,
+                primary_variance: true,
+                secondary_variance: true,
+                ..params(&payload(40))
+            })
+            .expect("generation failed")
+        };
+        let generated = generate_with(42);
+        assert_eq!(generated.decode_warning, None, "{style:?}");
+        assert_eq!(
+            generated.png_bytes,
+            generate_with(42).png_bytes,
+            "{style:?}"
+        );
+        assert_ne!(
+            generated.png_bytes,
+            generate_with(43).png_bytes,
+            "{style:?}"
+        );
+        let img = image::load_from_memory(&generated.png_bytes)
+            .expect("load failed")
+            .to_rgba8();
+        let shades: std::collections::HashSet<_> = img.pixels().map(|p| p.0).collect();
+        assert!(shades.len() > 10, "{style:?}: only {} shades", shades.len());
+    }
+}
+
 /// Two light colours (as the Zero Dawn preset uses) are split by Otsu's cut-off at once; the
 /// fixed mid-grey one would see no triangles at all.
 #[test]
@@ -350,7 +443,8 @@ fn decodes_two_light_colours_without_a_fallback() {
     for style in STYLES {
         let generated = generate_image_debug(GenerateImageParams {
             style,
-            fg_color: 0xFF90ADD3,
+            primary_color: 0xFF90ADD3,
+            secondary_color: 0xFFC0CAD7,
             bg_color: 0xFFC0CAD7,
             ..params(&payload(40))
         })
@@ -392,7 +486,8 @@ fn decodes_a_negative_colour_code_flipped() {
     for style in STYLES {
         let generated = generate_image_debug(GenerateImageParams {
             style,
-            fg_color: 0xFFFFE680,
+            primary_color: 0xFFFFE680,
+            secondary_color: 0xFF102040,
             bg_color: 0xFF102040,
             ..params(&payload(40))
         })
@@ -663,7 +758,7 @@ fn refuses_bad_overlays() {
         let overlay = Overlay { png: &png, share };
         let error = generate_with_overlay(ImageStyle::Tiles, EccLevel::Medium, overlay)
             .expect_err("accepted a bad share");
-        assert!(error.contains("Overlay must take"), "{share}: {error}");
+        assert!(error.contains("logo must take"), "{share}: {error}");
     }
     let overlay = Overlay {
         png: b"not a png",
@@ -671,7 +766,7 @@ fn refuses_bad_overlays() {
     };
     let error = generate_with_overlay(ImageStyle::Tiles, EccLevel::Medium, overlay)
         .expect_err("accepted garbage");
-    assert!(error.contains("overlay image"), "{error}");
+    assert!(error.contains("logo image"), "{error}");
 }
 
 #[test]

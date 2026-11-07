@@ -11,13 +11,20 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:logging/logging.dart';
 import 'package:super_clipboard/super_clipboard.dart';
+import 'src/bindings/bindings.dart';
 
 final _log = Logger('overlay');
 
-/// Largest share of the code's area an overlay may take at each error
-/// correction level (indexed like `SmallText.eccLevel`), matching
-/// `EccLevel::max_overlay_share` in native/tricode/src/frame.rs.
-const overlayMaxShares = [0.02, 0.06, 0.15, 0.18];
+extension OverlayMaxShare on EccLevel {
+  /// Largest share of the code's area an overlay may take at this level,
+  /// matching `EccLevel::max_overlay_share` in native/tricode/src/frame.rs.
+  double get maxOverlayShare => switch (this) {
+    EccLevel.low => 0.02,
+    EccLevel.medium => 0.06,
+    EccLevel.quartile => 0.15,
+    EccLevel.high => 0.18,
+  };
+}
 
 /// Longest side, in pixels, overlay images are scaled down to before being
 /// sent. Rust scales them again to fit the code, so more would only cost time.
@@ -28,13 +35,17 @@ const _overlayFontSize = 160.0;
 
 /// Decodes an image in any format Flutter reads (PNG, JPEG, GIF, WebP, BMP…)
 /// and re-encodes it as PNG, no larger than [overlayMaxSide] on either side.
-Future<Uint8List> imageToOverlayPng(Uint8List bytes) async {
+Future<Uint8List> imageToOverlayPng(Uint8List bytes) =>
+    imageToPng(bytes, maxSide: overlayMaxSide);
+
+/// Decodes an image in any format Flutter reads and re-encodes it as PNG, the
+/// only format Rust reads, scaled down to [maxSide] on either side if given.
+Future<Uint8List> imageToPng(Uint8List bytes, {int? maxSide}) async {
   final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
   final descriptor = await ui.ImageDescriptor.encoded(buffer);
-  final scale = min(
-    1.0,
-    overlayMaxSide / max(descriptor.width, descriptor.height),
-  );
+  final scale = maxSide == null
+      ? 1.0
+      : min(1.0, maxSide / max(descriptor.width, descriptor.height));
   final codec = await descriptor.instantiateCodec(
     targetWidth: max(1, (descriptor.width * scale).round()),
     targetHeight: max(1, (descriptor.height * scale).round()),
@@ -99,21 +110,41 @@ class OverlayTextStyle {
     this.font = platformFont,
     this.bold = true,
     this.italic = false,
-    this.outline = false,
+    this.outlineColor,
   });
 
+  /// Fill colour; may be transparent, which with an outline leaves hollow
+  /// letters.
   final Color color;
 
   final OverlayFont font;
   final bool bold;
   final bool italic;
 
-  /// Draw only the letters' outlines instead of filling them.
-  final bool outline;
+  /// Colour of an outline drawn around the letters, under the fill; null for
+  /// none.
+  final Color? outlineColor;
 
   /// The Flutter text style for drawing at [fontSize], also used to preview
   /// fonts in the picker.
-  TextStyle toTextStyle(double fontSize) {
+  TextStyle toTextStyle(double fontSize) => _textStyle(fontSize, color: color);
+
+  /// The outline: the same text stroked, drawn under the fill so only the
+  /// stroke's outer half shows.
+  TextStyle? _outlineStyle(double fontSize) {
+    final outlineColor = this.outlineColor;
+    if (outlineColor == null) return null;
+    return _textStyle(
+      fontSize,
+      foreground: Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = fontSize * _outlineWidth
+        ..strokeJoin = StrokeJoin.round
+        ..color = outlineColor,
+    );
+  }
+
+  TextStyle _textStyle(double fontSize, {Color? color, Paint? foreground}) {
     final weight = bold ? FontWeight.w700 : FontWeight.w400;
     return TextStyle(
       fontFamily: font.family,
@@ -124,37 +155,37 @@ class OverlayTextStyle {
           : null,
       fontStyle: italic ? FontStyle.italic : FontStyle.normal,
       height: 1.1,
-      // An outline replaces the fill colour with a stroke in that colour.
-      color: outline ? null : color,
-      foreground: outline
-          ? (Paint()
-              ..style = PaintingStyle.stroke
-              ..strokeWidth = fontSize * _outlineWidth
-              ..strokeJoin = StrokeJoin.round
-              ..color = color)
-          : null,
+      color: color,
+      foreground: foreground,
     );
   }
 }
 
-/// Outline stroke width as a share of the font size.
-const _outlineWidth = 0.05;
+/// Outline stroke width as a share of the font size; half of it shows
+/// outside the letters.
+const _outlineWidth = 0.12;
 
 /// Renders [text] (centred, one or more lines) in [style] on a transparent
 /// background, as PNG bytes.
 Future<Uint8List> textToOverlayPng(String text, OverlayTextStyle style) async {
-  final painter = TextPainter(
-    text: TextSpan(text: text, style: style.toTextStyle(_overlayFontSize)),
+  TextPainter layOut(TextStyle textStyle) => TextPainter(
+    text: TextSpan(text: text, style: textStyle),
     textAlign: TextAlign.center,
     textDirection: TextDirection.ltr,
   )..layout();
+  final painter = layOut(style.toTextStyle(_overlayFontSize));
+  final outlineStyle = style._outlineStyle(_overlayFontSize);
+  final outline = outlineStyle == null ? null : layOut(outlineStyle);
   // Generous room around the layout box, since slanted and script glyphs and
   // the outline stroke reach past it; the result is cropped to the ink.
   const padding = _overlayFontSize * 0.5;
   final width = (painter.width + 2 * padding).ceil();
   final height = (painter.height + 2 * padding).ceil();
   final recorder = ui.PictureRecorder();
-  painter.paint(Canvas(recorder), const Offset(padding, padding));
+  final canvas = Canvas(recorder);
+  outline?.paint(canvas, const Offset(padding, padding));
+  painter.paint(canvas, const Offset(padding, padding));
+  outline?.dispose();
   painter.dispose();
   final picture = recorder.endRecording();
   final image = await picture.toImage(width, height);

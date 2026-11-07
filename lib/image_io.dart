@@ -7,8 +7,9 @@ import 'dart:io';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:gal/gal.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:logging/logging.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:super_clipboard/super_clipboard.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -22,31 +23,28 @@ void showMessage(BuildContext context, String text) {
   ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
 }
 
-/// Saves [png] as `{prefix}_{timestamp}.png`: on mobile into the app's storage
-/// directory, on desktop wherever the user picks.
+/// Space below a tab's scrolling content, so its last buttons can be scrolled
+/// clear of the system navigation bar and of snack bars on a phone.
+double scrollEndPadding(BuildContext context) =>
+    MediaQuery.paddingOf(context).bottom + 80;
+
+/// Saves [png] as `{prefix}_{timestamp}.png`: on mobile into the photo
+/// gallery, on desktop wherever the user picks.
 Future<void> savePng(BuildContext context, Uint8List png, String prefix) async {
   final timestamp = DateTime.now()
       .toIso8601String()
       .replaceAll(':', '-')
       .split('.')[0];
-  final name = '${prefix}_$timestamp.png';
+  final name = '${prefix}_$timestamp';
   try {
     if (Platform.isAndroid || Platform.isIOS) {
-      final directory = Platform.isAndroid
-          ? await getExternalStorageDirectory()
-          : await getApplicationDocumentsDirectory();
-      if (directory == null) {
-        if (context.mounted) {
-          showMessage(context, 'Could not access storage directory');
-        }
-        return;
-      }
-      final path = '${directory.path}/$name';
-      await File(path).writeAsBytes(png);
-      if (context.mounted) showMessage(context, 'Image saved to: $path');
+      // The app's own storage directory is hidden from gallery and file
+      // manager apps, so mobile saves go to the gallery instead.
+      await Gal.putImageBytes(png, name: name);
+      if (context.mounted) showMessage(context, 'Image saved to the gallery');
     } else {
       final location = await getSaveLocation(
-        suggestedName: name,
+        suggestedName: '$name.png',
         acceptedTypeGroups: [
           const XTypeGroup(label: 'PNG Images', extensions: ['png']),
         ],
@@ -55,9 +53,14 @@ Future<void> savePng(BuildContext context, Uint8List png, String prefix) async {
       await XFile.fromData(
         png,
         mimeType: 'image/png',
-        name: name,
+        name: '$name.png',
       ).saveTo(location.path);
       if (context.mounted) _showSavedSnackBar(context, location.path);
+    }
+  } on GalException catch (e, stack) {
+    _log.warning('Saving image to the gallery failed', e, stack);
+    if (context.mounted) {
+      showMessage(context, 'Error saving image: ${e.type.message}');
     }
   } catch (e, stack) {
     _log.warning('Saving image failed', e, stack);
@@ -109,6 +112,24 @@ Future<Uint8List?> pickImageFile(List<String> extensions) async {
   final typeGroup = XTypeGroup(label: 'images', extensions: extensions);
   final file = await openFile(acceptedTypeGroups: [typeGroup]);
   return file?.readAsBytes();
+}
+
+/// Whether this device can take a photo with [takePhoto]: phones and tablets.
+bool get canTakePhoto => !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+
+/// Longest side, in pixels, photos are scaled down to. Codes filling a good
+/// part of the frame keep triangles far wider than the 37 px minimum, and
+/// decoding a full-resolution photo would take several times longer.
+const _photoMaxSide = 2048.0;
+
+/// Lets the user take a photo with the camera; null when they cancel.
+Future<Uint8List?> takePhoto() async {
+  final photo = await ImagePicker().pickImage(
+    source: ImageSource.camera,
+    maxWidth: _photoMaxSide,
+    maxHeight: _photoMaxSide,
+  );
+  return photo?.readAsBytes();
 }
 
 /// Tells the user where a file was saved, with an action that reveals it in

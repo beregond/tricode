@@ -11,6 +11,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'debug_tables.dart';
 import 'image_io.dart';
+import 'overlay.dart';
 import 'src/bindings/bindings.dart';
 
 final _log = Logger('read_tab');
@@ -90,13 +91,40 @@ class _ReadTabState extends State<ReadTab> with AutomaticKeepAliveClientMixin {
     if (bytes != null) _decode(bytes);
   }
 
-  void _decode(Uint8List bytes) {
+  Future<void> _takePhotoAndDecode() async {
+    try {
+      final bytes = await takePhoto();
+      if (bytes != null) _decode(bytes);
+    } catch (e, stack) {
+      _log.warning('Could not take photo', e, stack);
+      if (mounted) showMessage(context, 'Error taking photo: $e');
+    }
+  }
+
+  /// Decodes an image in any format Flutter reads: Rust only reads PNG, so
+  /// anything else (JPEG photos, mostly) is re-encoded first.
+  Future<void> _decode(Uint8List bytes) async {
     setState(() {
       _isDecoding = true;
       _result = null;
     });
-    ImageBytes(bytes: bytes).sendSignalToRust();
+    try {
+      final png = _isPng(bytes) ? bytes : await imageToPng(bytes);
+      ImageBytes(bytes: png).sendSignalToRust();
+    } catch (e, stack) {
+      _log.warning('Could not convert image to PNG', e, stack);
+      if (!mounted) return;
+      setState(() => _isDecoding = false);
+      showMessage(context, 'Could not read image: $e');
+    }
   }
+
+  static bool _isPng(Uint8List bytes) =>
+      bytes.length >= 8 &&
+      bytes[0] == 0x89 &&
+      bytes[1] == 0x50 &&
+      bytes[2] == 0x4E &&
+      bytes[3] == 0x47;
 
   @override
   Widget build(BuildContext context) {
@@ -104,6 +132,7 @@ class _ReadTabState extends State<ReadTab> with AutomaticKeepAliveClientMixin {
     final result = _result;
     return Center(
       child: SingleChildScrollView(
+        padding: EdgeInsets.only(bottom: scrollEndPadding(context)),
         child: Padding(
           padding: const EdgeInsets.all(24.0),
           child: Column(
@@ -114,15 +143,22 @@ class _ReadTabState extends State<ReadTab> with AutomaticKeepAliveClientMixin {
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 20),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
+              Wrap(
+                alignment: WrapAlignment.center,
+                spacing: 16,
+                runSpacing: 12,
                 children: [
+                  if (canTakePhoto)
+                    ElevatedButton.icon(
+                      onPressed: _takePhotoAndDecode,
+                      icon: const Icon(Icons.photo_camera),
+                      label: const Text('Take Photo'),
+                    ),
                   ElevatedButton.icon(
                     onPressed: _pickAndDecodeImage,
                     icon: const Icon(Icons.file_upload),
                     label: const Text('Select Image File'),
                   ),
-                  const SizedBox(width: 16),
                   ElevatedButton.icon(
                     onPressed: _pasteAndDecodeImage,
                     icon: const Icon(Icons.content_paste),
@@ -167,7 +203,8 @@ class _ReadTabState extends State<ReadTab> with AutomaticKeepAliveClientMixin {
   }
 }
 
-/// A successfully decoded payload: its type, and its text (a link for URLs).
+/// A successfully decoded payload: its type, its text, and for URLs a button
+/// that opens it.
 class _DecodedText extends StatelessWidget {
   const _DecodedText(this.result);
 
@@ -190,32 +227,76 @@ class _DecodedText extends StatelessWidget {
         const SizedBox(height: 8),
         _ContentTypeBadge(contentType),
         const SizedBox(height: 6),
-        if (contentType == 'url')
-          GestureDetector(
-            onTap: () async {
-              final uri = Uri.tryParse(text);
-              if (uri != null && await canLaunchUrl(uri)) {
-                await launchUrl(uri, mode: LaunchMode.externalApplication);
-              }
-            },
-            child: _TextBox(
-              borderColor: Colors.green,
-              child: Text(
-                text,
-                style: const TextStyle(
-                  fontSize: 14,
-                  color: Colors.blue,
-                  decoration: TextDecoration.underline,
-                ),
-              ),
-            ),
-          )
-        else
-          _TextBox(
-            borderColor: contentType == 'plain' ? Colors.orange : Colors.green,
-            child: SelectableText(text, style: const TextStyle(fontSize: 14)),
-          ),
+        _TextBox(
+          borderColor: contentType == 'plain' ? Colors.orange : Colors.green,
+          child: SelectableText(text, style: const TextStyle(fontSize: 14)),
+        ),
+        if (contentType == 'url') ...[
+          const SizedBox(height: 8),
+          _OpenUrlButton(text),
+        ],
       ],
+    );
+  }
+}
+
+/// Opens [url] in the browser, then stays disabled (showing a spinner) for
+/// [_cooldown], so repeated clicks don't open a pile of tabs.
+class _OpenUrlButton extends StatefulWidget {
+  const _OpenUrlButton(this.url);
+
+  final String url;
+
+  @override
+  State<_OpenUrlButton> createState() => _OpenUrlButtonState();
+}
+
+class _OpenUrlButtonState extends State<_OpenUrlButton> {
+  static const _cooldown = Duration(seconds: 3);
+
+  Timer? _cooldownTimer;
+
+  @override
+  void dispose() {
+    _cooldownTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _open() async {
+    setState(() {
+      _cooldownTimer = Timer(_cooldown, () {
+        if (mounted) setState(() => _cooldownTimer = null);
+      });
+    });
+    final uri = Uri.tryParse(widget.url);
+    try {
+      if (uri == null ||
+          !await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+        _log.warning('Could not open URL (${widget.url.length} chars)');
+      }
+    } catch (e, stack) {
+      _log.warning('Opening URL failed', e, stack);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final coolingDown = _cooldownTimer != null;
+    return FilledButton.icon(
+      onPressed: coolingDown ? null : _open,
+      style: FilledButton.styleFrom(
+        minimumSize: const Size(220, 56),
+        padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+        textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+        iconSize: 24,
+      ),
+      icon: coolingDown
+          ? const SizedBox.square(
+              dimension: 24,
+              child: CircularProgressIndicator(strokeWidth: 2.5),
+            )
+          : const Icon(Icons.open_in_new),
+      label: const Text('Open URL'),
     );
   }
 }

@@ -112,12 +112,12 @@ impl TriangleGrid {
     /// (a mitre join, as when stroking a polygon outline). At outward corners the strips meet and
     /// cut the corner off cleanly; at inward ones they meet in a sharp point instead of the round
     /// fillet that measuring to the nearest point of another shape would give.
-    pub(crate) fn on_border(
+    pub(crate) fn on_border<S: PartialEq>(
         &self,
         (x, y): (f64, f64),
         (row, col): (i64, i64),
         width: f64,
-        shape_of: impl Fn(i64, i64) -> Option<usize>,
+        shape_of: impl Fn(i64, i64) -> Option<S>,
     ) -> bool {
         let corners = self.vertices(row, col);
         // A strip within reach has to come within `width` of this cell's own edges first.

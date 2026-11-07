@@ -38,11 +38,12 @@ dependencies:
   meta: ^1.17.0
   tuple: ^2.0.2
   file_selector: ^1.0.3
-  path_provider: ^2.1.4
   url_launcher: ^6.3.1
   flutter_colorpicker: ^1.1.0
   super_clipboard: ^0.9.1
   logging: ^1.3.0
+  image_picker: ^1.2.4
+  gal: ^2.3.3
 
 dev_dependencies:
   flutter_test:
@@ -54,14 +55,6 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
-
-# jni (via path_provider_android) builds on Linux too, and 1.0.3+ pass a
-# `JNIEnv **` where its bundled jni.h wants `void **`, which current clang
-# rejects (-Wincompatible-pointer-types). 1.0.0 still has the cast; drop both
-# pins once a fixed jni is out.
-dependency_overrides:
-  jni: 1.0.0
-  jni_flutter: 1.0.1 # 1.0.4 asserts jni ^1.1.0
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -107,6 +100,7 @@ flutter:
 
   # Licences of the bundled overlay fonts, registered with LicenseRegistry.
   assets:
+    - assets/logo/tricode.png
     - assets/fonts/BebasNeue/OFL.txt
     - assets/fonts/Caveat/OFL.txt
     - assets/fonts/JetBrainsMono/OFL.txt

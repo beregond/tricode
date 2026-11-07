@@ -1,15 +1,26 @@
 import 'package:flutter/material.dart';
 
-/// A ready-made pair of code colours offered above the colour pickers.
+/// Ready-made code colours offered above the colour pickers: primary triangles
+/// (bit 1), secondary triangles (bit 0) and the background. Secondary triangles
+/// take the background colour unless given their own.
 class ColorPreset {
-  const ColorPreset(this.name, this.foreground, this.background);
+  const ColorPreset(
+    this.name,
+    this.primary,
+    this.background, {
+    Color? secondary,
+  }) : _secondary = secondary;
 
   final String name;
-  final Color foreground;
+  final Color primary;
   final Color background;
+  final Color? _secondary;
 
-  bool matches(Color foreground, Color background) =>
-      foreground.toARGB32() == this.foreground.toARGB32() &&
+  Color get secondary => _secondary ?? background;
+
+  bool matches(Color primary, Color secondary, Color background) =>
+      primary.toARGB32() == this.primary.toARGB32() &&
+      secondary.toARGB32() == this.secondary.toARGB32() &&
       background.toARGB32() == this.background.toARGB32();
 }
 
@@ -20,7 +31,7 @@ const zeroDawnPreset = ColorPreset(
   Color(0xFF90c2e3),
 );
 
-/// The two colours of a preset must differ in brightness by at least
+/// The primary and secondary colours of a preset must differ in brightness by at least
 /// `MIN_LUMA_GAP` (native/tricode/src/decode/mod.rs); either may be the
 /// lighter one. The first is the default black on white.
 const colorPresets = [

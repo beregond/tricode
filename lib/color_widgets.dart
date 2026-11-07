@@ -28,7 +28,7 @@ class ColorSwatchButton extends StatelessWidget {
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setS) => AlertDialog(
-          title: Text('Pick $label color'),
+          title: Text('Pick ${label.toLowerCase()} color'),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -115,7 +115,7 @@ class CheckerPainter extends CustomPainter {
   bool shouldRepaint(CheckerPainter old) => false;
 }
 
-/// A small triangle in the preset's triangle colour on its background.
+/// A primary and a secondary triangle in the preset's colours on its background.
 class PresetPreview extends StatelessWidget {
   const PresetPreview({super.key, required this.preset});
 
@@ -131,29 +131,41 @@ class PresetPreview extends StatelessWidget {
       ),
       child: CustomPaint(
         size: const Size.square(18),
-        painter: _TrianglePainter(preset.foreground),
+        painter: _TrianglePainter(preset.primary, preset.secondary),
       ),
     );
   }
 }
 
 class _TrianglePainter extends CustomPainter {
-  _TrianglePainter(this.color);
+  _TrianglePainter(this.primary, this.secondary);
 
-  final Color color;
+  final Color primary;
+  final Color secondary;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final inset = size.width * 0.2;
-    final path = Path()
-      ..moveTo(size.width / 2, inset)
-      ..lineTo(size.width - inset, size.height - inset)
-      ..lineTo(inset, size.height - inset)
+    // An upward primary triangle and a downward secondary one sharing an edge, as in a
+    // code; the secondary one disappears when it takes the background colour.
+    final inset = size.width * 0.15;
+    final (left, top) = (inset, inset);
+    final (width, bottom) = (size.width - 2 * inset, size.height - inset);
+    final third = width / 3;
+    final up = Path()
+      ..moveTo(left, bottom)
+      ..lineTo(left + 2 * third, bottom)
+      ..lineTo(left + third, top)
       ..close();
-    canvas.drawPath(path, Paint()..color = color);
+    final down = Path()
+      ..moveTo(left + third, top)
+      ..lineTo(left + width, top)
+      ..lineTo(left + 2 * third, bottom)
+      ..close();
+    canvas.drawPath(up, Paint()..color = primary);
+    canvas.drawPath(down, Paint()..color = secondary);
   }
 
   @override
   bool shouldRepaint(_TrianglePainter oldDelegate) =>
-      oldDelegate.color != color;
+      oldDelegate.primary != primary || oldDelegate.secondary != secondary;
 }

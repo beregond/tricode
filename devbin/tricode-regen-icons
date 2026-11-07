@@ -40,6 +40,9 @@ for f in web/icons/Icon-maskable-*.png; do
     magick -size "${size}x${size}" xc:white - -gravity center -composite "$f"
 done
 
+# The in-app logo (TricodeLogo in lib/home_page.dart).
+render 256 assets/logo/tricode.png
+
 mkdir -p linux/runner/resources
 render 256 linux/runner/resources/app_icon.png
 

@@ -12,6 +12,7 @@ import 'color_widgets.dart';
 import 'font_picker.dart';
 import 'image_io.dart';
 import 'overlay.dart';
+import 'src/bindings/bindings.dart';
 import 'system_fonts.dart';
 
 final _log = Logger('overlay_editor');
@@ -32,33 +33,39 @@ class OverlaySettings extends ChangeNotifier {
   bool italic = false;
   bool outline = false;
 
-  /// Colour of a text overlay; null = the triangle colour.
+  /// Colour of a text overlay; null = the code's primary colour.
   Color? textColor;
+
+  /// Colour of the text's outline; null = the code's secondary colour.
+  Color? outlineColor;
 
   /// Size as a fraction of the largest the error correction level allows, so
   /// changing the level keeps the overlay's relative size.
   double size = 1.0;
 
   /// Share of the code's area the overlay takes at [eccLevel].
-  double share(int eccLevel) => overlayMaxShares[eccLevel] * size;
+  double share(EccLevel eccLevel) => eccLevel.maxOverlayShare * size;
 
-  OverlayTextStyle textStyle(Color triangleColor) => OverlayTextStyle(
-    color: (textColor ?? triangleColor).withAlpha(255),
-    font: font,
-    bold: bold,
-    italic: italic,
-    outline: outline,
-  );
+  OverlayTextStyle textStyle(Color primaryColor, Color secondaryColor) =>
+      OverlayTextStyle(
+        color: textColor ?? primaryColor.withAlpha(255),
+        font: font,
+        bold: bold,
+        italic: italic,
+        outlineColor: outline
+            ? outlineColor ?? secondaryColor.withAlpha(255)
+            : null,
+      );
 
   /// The overlay to draw over the code as PNG bytes; empty for none.
-  Future<Uint8List> png(Color triangleColor) async {
+  Future<Uint8List> png(Color primaryColor, Color secondaryColor) async {
     switch (mode) {
       case OverlayMode.none:
         return Uint8List(0);
       case OverlayMode.text:
         final line = text.text.trim();
         if (line.isEmpty) return Uint8List(0);
-        return textToOverlayPng(line, textStyle(triangleColor));
+        return textToOverlayPng(line, textStyle(primaryColor, secondaryColor));
       case OverlayMode.image:
         return image ?? Uint8List(0);
     }
@@ -81,6 +88,7 @@ class OverlaySettings extends ChangeNotifier {
     italic = false;
     outline = false;
     textColor = null;
+    outlineColor = null;
   });
 
   @override
@@ -97,14 +105,21 @@ class OverlayEditor extends StatefulWidget {
     super.key,
     required this.settings,
     required this.eccLevel,
-    required this.triangleColor,
+    required this.primaryColor,
+    required this.secondaryColor,
     required this.onChanged,
+    required this.onModeChanged,
   });
 
   final OverlaySettings settings;
-  final int eccLevel;
-  final Color triangleColor;
+  final EccLevel eccLevel;
+  final Color primaryColor;
+  final Color secondaryColor;
   final VoidCallback onChanged;
+
+  /// Called instead of [onChanged] when the mode changes, so the owner can
+  /// adjust its own settings before regenerating.
+  final ValueChanged<OverlayMode> onModeChanged;
 
   @override
   State<OverlayEditor> createState() => _OverlayEditorState();
@@ -138,7 +153,7 @@ class _OverlayEditorState extends State<OverlayEditor> {
         padding: const EdgeInsets.symmetric(horizontal: 16.0),
         child: InputDecorator(
           decoration: const InputDecoration(
-            labelText: 'Centre overlay',
+            labelText: 'Logo',
             border: OutlineInputBorder(),
           ),
           child: Column(
@@ -150,8 +165,10 @@ class _OverlayEditorState extends State<OverlayEditor> {
                   ButtonSegment(value: OverlayMode.image, label: Text('Image')),
                 ],
                 selected: {_settings.mode},
-                onSelectionChanged: (selection) =>
-                    _change(() => _settings.mode = selection.first),
+                onSelectionChanged: (selection) {
+                  _settings.update(() => _settings.mode = selection.first);
+                  widget.onModeChanged(selection.first);
+                },
               ),
               if (_settings.mode == OverlayMode.text) ...[
                 const SizedBox(height: 12),
@@ -180,7 +197,7 @@ class _OverlayEditorState extends State<OverlayEditor> {
       minLines: 1,
       maxLines: 3,
       decoration: const InputDecoration(
-        labelText: 'Overlay text',
+        labelText: 'Logo text',
         border: OutlineInputBorder(),
       ),
       onChanged: (_) {
@@ -195,7 +212,10 @@ class _OverlayEditorState extends State<OverlayEditor> {
 
   /// Font, style and colour of a text overlay.
   Widget _buildTextStyleOptions(BuildContext context) {
-    final textColor = _settings.textStyle(widget.triangleColor).color;
+    final style = _settings.textStyle(
+      widget.primaryColor,
+      widget.secondaryColor,
+    );
     return Column(
       children: [
         _buildFontDropdown(context),
@@ -224,15 +244,29 @@ class _OverlayEditorState extends State<OverlayEditor> {
             const SizedBox(width: 8),
             ColorSwatchButton(
               label: 'Text',
-              color: textColor,
-              showAlpha: false,
+              color: style.color,
+              // Transparent text with an outline gives hollow letters.
+              showAlpha: true,
               onChanged: (c) => _change(() => _settings.textColor = c),
             ),
             if (_settings.textColor != null)
               TextButton(
                 onPressed: () => _change(() => _settings.textColor = null),
-                child: const Text('Match triangles'),
+                child: const Text('Match primary'),
               ),
+            if (style.outlineColor case final outlineColor?) ...[
+              ColorSwatchButton(
+                label: 'Outline',
+                color: outlineColor,
+                showAlpha: false,
+                onChanged: (c) => _change(() => _settings.outlineColor = c),
+              ),
+              if (_settings.outlineColor != null)
+                TextButton(
+                  onPressed: () => _change(() => _settings.outlineColor = null),
+                  child: const Text('Match secondary'),
+                ),
+            ],
           ],
         ),
       ],
@@ -370,7 +404,7 @@ class _OverlayEditorState extends State<OverlayEditor> {
 
   Widget _buildSizeOptions() {
     final percent = (_settings.share(widget.eccLevel) * 100).toStringAsFixed(1);
-    final maxPercent = overlayMaxShares[widget.eccLevel] * 100;
+    final maxPercent = widget.eccLevel.maxOverlayShare * 100;
     return Column(
       children: [
         Row(
@@ -396,7 +430,7 @@ class _OverlayEditorState extends State<OverlayEditor> {
         ),
         Text(
           'Up to ${maxPercent.toStringAsFixed(0)}% of the code at this '
-          'error correction level; raise it for a larger overlay.',
+          'error correction level; raise it for a larger logo.',
           style: const TextStyle(fontSize: 12, color: Colors.grey),
           textAlign: TextAlign.center,
         ),
