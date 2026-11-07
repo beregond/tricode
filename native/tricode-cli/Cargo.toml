@@ -13,5 +13,6 @@ doc = false
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 tricode = { version = "0.1.0", path = "../tricode" }
