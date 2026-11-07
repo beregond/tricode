@@ -16,7 +16,7 @@ use detect::{Anchors, Triangle, discard_merged_triangles, find_anchors, find_tri
 use image::{GrayImage, RgbaImage};
 use imageproc::contrast::{ThresholdType, otsu_level, threshold};
 use lattice::fit_lattice;
-use search::{GridContext, try_grid_strategies};
+use search::{GridContext, read_fitted_grid, try_grid_strategies};
 use tracing::{instrument, trace};
 
 #[cfg(test)]
@@ -120,6 +120,21 @@ pub fn decode_image(png_bytes: &[u8]) -> Result<DecodeDebug, String> {
         }
         None => Err(failures),
     }
+}
+
+/// Reads a code exactly as the generator rendered it and returns its text, or `None` if it
+/// doesn't decode. Much faster than [`decode_image`] on failure: a pristine image needs none of its
+/// fallbacks, so this tries only the Otsu cut-off, the polarity the margin suggests, the strongest
+/// erosion and the fitted lattice, unflipped.
+#[instrument(level = "debug", skip_all, fields(bytes = png_bytes.len()))]
+pub(crate) fn decode_rendered(png_bytes: &[u8]) -> Option<String> {
+    let img = image::load_from_memory(png_bytes).ok()?.to_rgba8();
+    let gray_img = image::DynamicImage::ImageRgba8(img).to_luma8();
+    let [(binary, _), _] = polarities(&gray_img, otsu_level(&gray_img));
+    let triangles = find_triangles(&binary, EROSION_RADII[0]).ok()?;
+    let anchors = find_anchors(&triangles)?;
+    let triangles = discard_merged_triangles(triangles, &anchors);
+    read_fitted_grid(&binary, &fit_lattice(&triangles, &anchors)?)
 }
 
 /// Cut-offs to split pixels into triangle and background at, as `(level, is_fixed)`.

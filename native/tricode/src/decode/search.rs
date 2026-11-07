@@ -115,6 +115,17 @@ pub(crate) fn try_grid_strategies(gray_img: &GrayImage, ctx: &GridContext) -> De
     failure(base, gray_img, ctx, failures)
 }
 
+/// Reads only the fitted grid, unflipped, and returns its text. This is the fast check of a code
+/// just rendered: the lattice fit describes a pristine image exactly, and when it doesn't decode,
+/// the other strategies, flips and neighbours don't either.
+pub(crate) fn read_fitted_grid(gray_img: &GrayImage, fit: &LatticeFit) -> Option<String> {
+    let cells = sample_cells(gray_img, fit.rows, fit.cols, &fit.lattice);
+    let packed = pack_data_bits(&cells, FLIPS[0]);
+    try_unmix_decode(&packed, fit.rows, fit.cols)
+        .ok()
+        .map(|decoded| decoded.text)
+}
+
 /// Reads `grids` in parallel and returns the first one (in their order) that decodes. Each grid
 /// costs every flip × mask × level, which adds up when nothing decodes. On failure, returns the
 /// error of reading the first grid unflipped, if there was a first grid.

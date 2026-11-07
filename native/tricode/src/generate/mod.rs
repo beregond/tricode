@@ -6,7 +6,7 @@ mod overlay;
 mod render;
 mod shade;
 
-use crate::decode::{MIN_LUMA_GAP, decode_image};
+use crate::decode::{MIN_LUMA_GAP, decode_rendered};
 use crate::frame::{EccLevel, encode_frame};
 use crate::grid::{
     check_image_pixels, gcd, grid_capacity, grid_for_payload, image_size, layout_cells,
@@ -112,7 +112,8 @@ fn decode_warning(png: &[u8], params: &GenerateImageParams<'_>) -> Option<String
              ({primary} and {secondary} of 255; they need to be at least {MIN_LUMA_GAP} apart)."
         ));
     }
-    let decodes = decode_image(png).is_ok_and(|d| d.text.as_deref() == Some(params.payload));
+    // Only the decoder's first attempt: a pristine image that fails it fails every fallback too.
+    let decodes = decode_rendered(png).as_deref() == Some(params.payload);
     match (decodes, params.overlay.is_some()) {
         (true, _) => None,
         // The overlay's share is kept within what the level repairs, but what it covers varies.
