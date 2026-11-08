@@ -38,6 +38,7 @@ native/tricode/src/          Pure Rust logic; lib.rs only declares modules and r
                              search.rs (grid strategies), read.rs (sampling, flips, unmasking), annotate.rs
   tests.rs                   End-to-end tests and shared test helpers (`params`, `payload`, …)
 native/tricode-cli/          Command-line frontend, binary `tricode` (src/main.rs: `encode`, `decode`); mirrors the Generate/Read options except text overlays and colour presets
+docs/privacy.html            Privacy policy for the store listings
 Cargo.toml                   Workspace root (members = ["native/*"]); any new crate in native/ auto-joins
 ```
 
@@ -131,6 +132,8 @@ Never print. Rust logs with `tracing` macros (`debug!`, `trace!` with structured
 - **Grid search runs in parallel** (`par_iter().find_map_first` over each estimate's neighbourhood), since every grid costs 4 flips × 7 masks × 4 levels. A decode that fails takes about 0.5 s for small codes and 3 s for the largest on a desktop, mostly triangle detection repeated per erosion radius.
 - **Bare UTF-8 payloads** (codes without an envelope) decode as `("plain", text)`. `unpack_payload` tries UTF-8 *before* generic msgpack, because every ASCII byte is a msgpack integer (`"abcde"` would read as `97`).
 - **Binary names**: the CLI is `tricode`, the Flutter desktop app is `tricode-gui` (`BINARY_NAME` in `linux/` and `windows/CMakeLists.txt`, `PRODUCT_NAME` in `macos/Runner/Configs/AppInfo.xcconfig`, plus the `.app` references in the Xcode project), so both install side by side. The Dart package is still `tricode_app`. The CLI crate may print (it has no `print_*` denies); decoded text goes to stdout, everything else (including `--verbose` debug info) to stderr, and logs follow `RUST_LOG` (default `warn`).
+- **App ID** is `io.github.beregond.tricode` on Android, iOS, macOS and Linux (`applicationId`, `PRODUCT_BUNDLE_IDENTIFIER`, `APPLICATION_ID`); stores tie the listing to it, so it must not change after the first upload.
+- **Privacy policy** is `docs/privacy.html`, linked from the store listings. It promises no network access and no data collection: update it when adding a permission, networking or anything that handles user data.
 - **App icons** and the in-app logo (`assets/logo/tricode.png`, shown by `TricodeLogo`) are all rendered from `assets/logo/tricode.svg` by `tricode-regen-icons` (needs `rsvg-convert` and ImageMagick); edit the SVG, never the PNGs. iOS and web maskable icons get a white background (App Store refuses alpha; maskable icons are cropped). Linux installs `linux/runner/resources/app_icon.png` into the bundle's `data/` and `my_application.cc` sets it on the window.
 - **`devbin/`** holds dev scripts; `.envrc` adds it to `PATH` via direnv (run `direnv allow` once). Without direnv, call them as `devbin/<script>`.
 - **Rust edition `2024`** requires Rust ≥ 1.85; workspace resolver `"3"` requires Rust ≥ 1.74. No `.rust-toolchain` file exists.

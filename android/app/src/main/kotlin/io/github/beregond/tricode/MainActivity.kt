@@ -1,4 +1,4 @@
-package com.example.tricode_app
+package io.github.beregond.tricode
 
 import io.flutter.embedding.android.FlutterActivity
 

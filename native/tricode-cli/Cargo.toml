@@ -3,6 +3,11 @@ name = "tricode-cli"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+description = "Command-line tool that writes triangle-grid codes as PNGs and reads them back from images"
+repository = "https://github.com/beregond/tricode"
+readme = "README.md"
+keywords = ["barcode", "triangle", "reed-solomon", "cli", "image"]
+categories = ["command-line-utilities", "multimedia::images"]
 
 # The command is `tricode`; the Flutter app's binary is `tricode-gui`, so both install side by side.
 [[bin]]

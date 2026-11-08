@@ -3,6 +3,11 @@ name = "tricode"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+description = "Encode text into triangle-grid codes and read them back from images"
+repository = "https://github.com/beregond/tricode"
+readme = "README.md"
+keywords = ["barcode", "triangle", "reed-solomon", "encoding", "image"]
+categories = ["encoding", "multimedia::images"]
 
 # Log with `tracing` macros instead; the hub forwards events to Dart.
 [lints.clippy]
