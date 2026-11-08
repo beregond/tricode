@@ -10,6 +10,7 @@ Future<void> main() async {
   setUpLogging();
   await initializeRust(assignRustSignal);
   sendRustLogFilter();
+  registerAppLicense();
   registerOverlayFontLicenses();
   runApp(const MyApp());
 }

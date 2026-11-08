@@ -1,11 +1,28 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:logging/logging.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'generate_tab.dart';
 import 'read_tab.dart';
 
+final _log = Logger('home_page');
+
+final _homepage = Uri.https('github.com', '/beregond/tricode');
+
 /// Light, dark or follow the system; picked in the settings dialog.
 final themeMode = ValueNotifier(ThemeMode.system);
+
+/// Adds the app's own licence to the app's licence page.
+void registerAppLicense() {
+  LicenseRegistry.addLicense(() async* {
+    yield LicenseEntryWithLineBreaks([
+      'Tricode',
+    ], await rootBundle.loadString('LICENSE'));
+  });
+}
 
 /// The app's only page: the Read and Generate tabs, and the settings.
 class HomePage extends StatefulWidget {
@@ -54,20 +71,25 @@ class _HomePageState extends State<HomePage>
           ],
         ),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            tooltip: 'Settings',
+            onPressed: () => showDialog<void>(
+              context: context,
+              builder: (context) => _SettingsDialog(
+                showDebugInfo: _showDebugInfo,
+                onShowDebugInfoChanged: (enabled) =>
+                    setState(() => _showDebugInfo = enabled),
+              ),
+            ),
+          ),
           Padding(
             // Clear of the debug banner.
             padding: EdgeInsets.only(right: kDebugMode ? 48.0 : 0.0),
             child: IconButton(
-              icon: const Icon(Icons.settings),
-              tooltip: 'Settings',
-              onPressed: () => showDialog<void>(
-                context: context,
-                builder: (context) => _SettingsDialog(
-                  showDebugInfo: _showDebugInfo,
-                  onShowDebugInfoChanged: (enabled) =>
-                      setState(() => _showDebugInfo = enabled),
-                ),
-              ),
+              icon: const Icon(Icons.help_outline),
+              tooltip: 'About',
+              onPressed: () => _showAbout(context),
             ),
           ),
         ],
@@ -88,6 +110,52 @@ class _HomePageState extends State<HomePage>
         ],
       ),
     );
+  }
+}
+
+/// The version, homepage, licence and copyright, with the standard link to the
+/// licence page.
+Future<void> _showAbout(BuildContext context) async {
+  final info = await PackageInfo.fromPlatform();
+  if (!context.mounted) return;
+  showAboutDialog(
+    context: context,
+    applicationName: 'Tricode',
+    applicationVersion: info.version,
+    applicationIcon: const TricodeLogo(size: 48),
+    children: [
+      const SizedBox(height: 16),
+      const Text(
+        'Released under the MIT License: free to use, copy, change and share, '
+        'as long as the copyright and licence notice stay with it. It comes '
+        'with no warranty.',
+      ),
+      const SizedBox(height: 8),
+      Align(
+        alignment: Alignment.centerLeft,
+        child: TextButton.icon(
+          onPressed: _openHomepage,
+          style: TextButton.styleFrom(padding: EdgeInsets.zero),
+          icon: const Icon(Icons.open_in_new),
+          label: Text('${_homepage.host}${_homepage.path}'),
+        ),
+      ),
+      const SizedBox(height: 8),
+      Text(
+        'Copyright © 2026 Szczepan Cieślik',
+        style: Theme.of(context).textTheme.bodySmall,
+      ),
+    ],
+  );
+}
+
+Future<void> _openHomepage() async {
+  try {
+    if (!await launchUrl(_homepage, mode: LaunchMode.externalApplication)) {
+      _log.warning('Could not open the homepage');
+    }
+  } catch (e, stack) {
+    _log.warning('Opening the homepage failed', e, stack);
   }
 }
 

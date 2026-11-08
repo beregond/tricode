@@ -7,7 +7,7 @@ Flutter + Rust hybrid using [rinf](https://github.com/cunarist/rinf) as the brid
 ```
 lib/
   main.dart                  Entry point, theme
-  home_page.dart             Tabs (Read/Generate) and the settings dialog (debug info, theme)
+  home_page.dart             Tabs (Read/Generate), the settings dialog (debug info, theme) and the about dialog (version, homepage, licences, copyright)
   read_tab.dart              Read tab: decode from a file or the clipboard
   generate_tab.dart          Generate tab: inputs, options, preview
   overlay_editor.dart        Centre-overlay options (OverlaySettings + OverlayEditor)

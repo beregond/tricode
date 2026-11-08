@@ -5,7 +5,9 @@
 // gestures. You can also use WidgetTester to find child widgets in the widget
 // tree, read text, and verify that the values of widget properties are correct.
 
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 import 'package:tricode_app/main.dart';
 
@@ -17,4 +19,26 @@ void main() {
     // Verify that the app loads without errors.
     expect(find.byType(MyApp), findsOneWidget);
   });
+
+  testWidgets(
+    'The help button shows version, homepage, copyright and licence',
+    (WidgetTester tester) async {
+      PackageInfo.setMockInitialValues(
+        appName: 'Tricode',
+        packageName: 'io.github.beregond.tricode',
+        version: '1.2.3',
+        buildNumber: '4',
+        buildSignature: '',
+      );
+      await tester.pumpWidget(const MyApp());
+      await tester.tap(find.byIcon(Icons.help_outline));
+      await tester.pumpAndSettle();
+
+      expect(find.text('1.2.3'), findsOneWidget);
+      expect(find.text('github.com/beregond/tricode'), findsOneWidget);
+      expect(find.textContaining('Szczepan Cieślik'), findsOneWidget);
+      expect(find.textContaining('MIT License'), findsOneWidget);
+      expect(find.text('View licenses'), findsOneWidget);
+    },
+  );
 }

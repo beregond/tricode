@@ -44,6 +44,7 @@ dependencies:
   logging: ^1.3.0
   image_picker: ^1.2.4
   gal: ^2.3.3
+  package_info_plus: ^9.0.1
 
 dev_dependencies:
   flutter_test:
@@ -98,8 +99,10 @@ flutter:
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
 
-  # Licences of the bundled overlay fonts, registered with LicenseRegistry.
+  # The app's licence and those of the bundled overlay fonts are registered
+  # with LicenseRegistry.
   assets:
+    - LICENSE
     - assets/logo/tricode.png
     - assets/fonts/BebasNeue/OFL.txt
     - assets/fonts/Caveat/OFL.txt
