@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Rewrites assets/licenses/rust.json, the licences of the Rust crates compiled into the app, shown
+# on its licence page. Run it after any Cargo.lock change. Needs cargo-about and jq; CI runs it too
+# and fails if the committed file differs.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# --frozen below reads licence files from the local registry only, so the output doesn't depend on
+# the network.
+cargo fetch --locked
+cargo about generate -c about.toml --manifest-path native/hub/Cargo.toml --format json --frozen --fail |
+  jq '[.licenses[]
+       | {text, crates: [.used_by[].crate.name | select(. != "tricode")] | unique}
+       | select(.crates | length > 0)]
+      | sort_by(.crates, .text)' > assets/licenses/rust.json

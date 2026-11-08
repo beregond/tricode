@@ -99,10 +99,11 @@ flutter:
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
 
-  # The app's licence and those of the bundled overlay fonts are registered
-  # with LicenseRegistry.
+  # The licences of the app, its Rust crates and the bundled overlay fonts are
+  # registered with LicenseRegistry.
   assets:
     - LICENSE
+    - assets/licenses/rust.json
     - assets/logo/tricode.png
     - assets/fonts/BebasNeue/OFL.txt
     - assets/fonts/Caveat/OFL.txt

@@ -5,10 +5,12 @@
 // gestures. You can also use WidgetTester to find child widgets in the widget
 // tree, read text, and verify that the values of widget properties are correct.
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
+import 'package:tricode_app/home_page.dart';
 import 'package:tricode_app/main.dart';
 
 void main() {
@@ -41,4 +43,20 @@ void main() {
       expect(find.text('View licenses'), findsOneWidget);
     },
   );
+
+  test('The licence page lists the app and its Rust crates', () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    registerAppLicenses();
+
+    final packages = <String>{};
+    await for (final license in LicenseRegistry.licenses) {
+      packages.addAll(license.packages);
+    }
+
+    expect(
+      packages,
+      containsAll(['Tricode', 'rayon', 'tokio', 'allo-isolate']),
+    );
+    expect(packages, isNot(contains('hub')));
+  });
 }

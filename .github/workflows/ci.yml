@@ -19,6 +19,7 @@ env:
   FLUTTER_VERSION: "3.47.2"
   # Must match `rinf` in native/hub/Cargo.toml and pubspec.yaml.
   RINF_VERSION: "8.11.0"
+  CARGO_ABOUT_VERSION: "0.9.3"
 
 jobs:
   rust-lint:
@@ -52,6 +53,25 @@ jobs:
           if [ -n "$(git status --porcelain -- native/tricode/testdata/decode)" ]; then
             git status --short -- native/tricode/testdata/decode
             echo "::error::Decode fixtures are stale. Run devbin/tricode-regen-fixtures and commit the result."
+            exit 1
+          fi
+
+  licenses:
+    name: Rust licences up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-about --version "$CARGO_ABOUT_VERSION" --locked --features cli
+      - name: Check the licence list is up to date
+        run: |
+          devbin/tricode-regen-licenses
+          if [ -n "$(git status --porcelain -- assets/licenses)" ]; then
+            git status --short -- assets/licenses
+            echo "::error::Rust licence list is stale. Run devbin/tricode-regen-licenses and commit the result."
             exit 1
           fi
 
