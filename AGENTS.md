@@ -83,6 +83,7 @@ Each actor spawns its own Dart-signal listener in `new()` using `JoinSet::spawn`
 | Regenerate decode fixtures | `tricode-regen-fixtures` |
 | Regenerate app icons | `tricode-regen-icons` |
 | Regenerate Rust licence list | `tricode-regen-licenses` |
+| Linux AppImage (single file) | `tricode-appimage` → `build/Tricode-<version>-x86_64.AppImage` |
 | Rust lint | `cargo clippy` |
 | Rust format | `cargo fmt` |
 | Flutter tests | `flutter test` |

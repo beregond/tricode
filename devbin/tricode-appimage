@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Builds the Linux release and packs its bundle into one file, build/Tricode-<version>-x86_64.AppImage.
+# Downloads appimagetool into build/ on first use. The AppImage needs at least the glibc of the
+# machine it was built on, so build on an old distro (e.g. Ubuntu 22.04) to run on most others.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+appimagetool_version=1.9.0
+tool=build/appimagetool-$appimagetool_version-x86_64.AppImage
+version=$(sed -n 's/^version: *\([^+]*\).*/\1/p' pubspec.yaml)
+appdir=build/Tricode.AppDir
+out=build/Tricode-$version-x86_64.AppImage
+
+flutter build linux --release
+
+if [[ ! -x "$tool" ]]; then
+  mkdir -p build
+  curl -fL -o "$tool.part" \
+    "https://github.com/AppImage/appimagetool/releases/download/$appimagetool_version/appimagetool-x86_64.AppImage"
+  chmod +x "$tool.part"
+  mv "$tool.part" "$tool"
+fi
+
+rm -rf "$appdir"
+mkdir -p "$appdir"
+cp -r build/linux/x64/release/bundle/. "$appdir/"
+cp linux/runner/resources/app_icon.png "$appdir/tricode.png"
+
+cat >"$appdir/AppRun" <<'EOF'
+#!/bin/sh
+HERE="$(dirname "$(readlink -f "$0")")"
+exec "$HERE/tricode-gui" "$@"
+EOF
+chmod +x "$appdir/AppRun"
+
+cat >"$appdir/tricode.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Tricode
+Exec=tricode-gui
+Icon=tricode
+Categories=Graphics;Utility;
+EOF
+
+ARCH=x86_64 "$tool" --no-appstream "$appdir" "$out"
+echo "Built $out"
