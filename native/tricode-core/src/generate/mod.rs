@@ -21,7 +21,7 @@ use image::{Rgba, RgbaImage};
 use overlay::{clear_cells_under, draw_overlay, load_overlay, over, overlay_box};
 use render::{border_width, cell_shapes, paint_shapes};
 use shade::cell_colours;
-use std::time::SystemTime;
+use web_time::SystemTime;
 
 pub use overlay::{MAX_OVERLAY_PIXELS, Overlay};
 

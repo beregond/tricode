@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Builds the release web app into build/web and packs it into one file,
+# build/Tricode-<version>-web.zip: the Rust side as an optimised WebAssembly module, then the
+# Flutter bundle with CanvasKit included (--no-web-resources-cdn), so the page loads nothing from
+# other sites. Extra arguments are passed to `flutter build web`, e.g.
+# `tricode-web-build --base-href /tricode/`.
+#
+# Unzip it on any static host (it can't run from file://: browsers refuse WebAssembly, workers and
+# service workers there). When the host doesn't send the cross-origin isolation headers,
+# web/coi_service_worker.js adds them (the first visit reloads once). Sending them from the server
+#   Cross-Origin-Opener-Policy: same-origin
+#   Cross-Origin-Embedder-Policy: require-corp
+# skips that reload.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+version=$(sed -n 's/^version: *\([^+]*\).*/\1/p' pubspec.yaml)
+out=build/Tricode-$version-web.zip
+
+rinf wasm --release
+flutter build web --no-web-resources-cdn "$@"
+rm -f "$out"
+(cd build/web && zip -qr9 "../../$out" .)
+echo "Built $out ($(du -h "$out" | cut -f1))"

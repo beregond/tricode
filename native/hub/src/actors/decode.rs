@@ -1,12 +1,13 @@
 use crate::signals::{DecodeResult, ImageBytes};
+use crate::web_threads::in_pool;
 use async_trait::async_trait;
 use messages::prelude::{Actor, Address, Context, Notifiable};
 use rinf::{DartSignal, RustSignal};
 use tokio::task::JoinSet;
 use tracing::{debug, error, info};
 
-// Uncomment below to target the web.
-// use tokio_with_wasm::alias as tokio;
+// `tokio_with_wasm` is tokio itself on native targets and a JavaScript-backed shim on the web.
+use tokio_with_wasm::alias as tokio;
 
 /// The decode actor.
 pub struct DecodeActor {
@@ -29,7 +30,8 @@ impl DecodeActor {
 impl Notifiable<ImageBytes> for DecodeActor {
     async fn notify(&mut self, msg: ImageBytes, _: &Context<Self>) {
         // Decoding takes up to seconds, which would stall the single-threaded runtime.
-        let signal = match tokio::task::spawn_blocking(move || decode(&msg.bytes)).await {
+        let signal = match tokio::task::spawn_blocking(move || in_pool(|| decode(&msg.bytes))).await
+        {
             Ok(signal) => signal,
             Err(e) => {
                 error!(error = %e, "decode task failed");

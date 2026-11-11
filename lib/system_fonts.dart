@@ -9,10 +9,16 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
-/// Whether [installedFontFamilies] can list fonts here: desktops only, since
-/// phones neither expose their fonts nor let apps use most of them by name.
+/// Whether [installedFontFamilies] can list fonts here: desktop apps only,
+/// since phones neither expose their fonts nor let apps use most of them by
+/// name, and a browser hides the computer's fonts from the page.
 bool get canListInstalledFonts =>
-    !kIsWeb && (Platform.isLinux || Platform.isMacOS || Platform.isWindows);
+    !kIsWeb &&
+    const {
+      TargetPlatform.linux,
+      TargetPlatform.macOS,
+      TargetPlatform.windows,
+    }.contains(defaultTargetPlatform);
 
 /// Answered by macos/Runner/MainFlutterWindow.swift.
 const _macChannel = MethodChannel('tricode/fonts');
@@ -21,15 +27,15 @@ const _macChannel = MethodChannel('tricode/fonts');
 /// Throws when the system can't be asked.
 Future<List<String>> installedFontFamilies() async {
   final List<String> families;
-  if (Platform.isLinux) {
+  if (!canListInstalledFonts) {
+    families = const [];
+  } else if (defaultTargetPlatform == TargetPlatform.linux) {
     families = await _linuxFamilies();
-  } else if (Platform.isMacOS) {
+  } else if (defaultTargetPlatform == TargetPlatform.macOS) {
     families =
         await _macChannel.invokeListMethod<String>('families') ?? const [];
-  } else if (Platform.isWindows) {
-    families = await _windowsFamilies();
   } else {
-    families = const [];
+    families = await _windowsFamilies();
   }
   final unique = {
     for (final family in families)

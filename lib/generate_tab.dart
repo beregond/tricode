@@ -792,7 +792,7 @@ class _GenerateTabState extends State<GenerateTab>
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           ElevatedButton.icon(
-            onPressed: () => savePng(context, code.png, 'generated_image'),
+            onPressed: () => savePng(context, code.png, 'tricode'),
             icon: const Icon(Icons.download),
             label: const Text('Download Image'),
           ),

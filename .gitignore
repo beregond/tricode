@@ -47,6 +47,8 @@ app.*.map.json
 # Rust related
 /.cargo/
 /target/
+# WebAssembly module built by `rinf wasm`
+/web/pkg/
 
 # Generated signals
 /lib/src/bincode

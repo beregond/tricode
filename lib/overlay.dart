@@ -41,14 +41,19 @@ Future<Uint8List> imageToOverlayPng(Uint8List bytes) =>
 /// Decodes an image in any format Flutter reads and re-encodes it as PNG, the
 /// only format Rust reads, scaled down to [maxSide] on either side if given.
 Future<Uint8List> imageToPng(Uint8List bytes, {int? maxSide}) async {
+  // Not ImageDescriptor: its width and height throw on the web.
   final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
-  final descriptor = await ui.ImageDescriptor.encoded(buffer);
-  final scale = maxSide == null
-      ? 1.0
-      : min(1.0, maxSide / max(descriptor.width, descriptor.height));
-  final codec = await descriptor.instantiateCodec(
-    targetWidth: max(1, (descriptor.width * scale).round()),
-    targetHeight: max(1, (descriptor.height * scale).round()),
+  final codec = await ui.instantiateImageCodecWithSize(
+    buffer,
+    getTargetSize: (width, height) {
+      final scale = maxSide == null
+          ? 1.0
+          : min(1.0, maxSide / max(width, height));
+      return ui.TargetImageSize(
+        width: max(1, (width * scale).round()),
+        height: max(1, (height * scale).round()),
+      );
+    },
   );
   final frame = await codec.getNextFrame();
   try {
@@ -56,8 +61,6 @@ Future<Uint8List> imageToPng(Uint8List bytes, {int? maxSide}) async {
   } finally {
     frame.image.dispose();
     codec.dispose();
-    descriptor.dispose();
-    buffer.dispose();
   }
 }
 

@@ -85,12 +85,54 @@ where
         message.push_str(&writer.fields);
 
         let metadata = event.metadata();
-        RustLog {
+        deliver(RustLog {
             level: metadata.level().to_string(),
             target: metadata.target().to_string(),
             message,
+        });
+    }
+}
+
+/// Queue of events for the main thread to send, set by `forward_from_workers`. On the web, rinf
+/// can only send signals from the browser's main thread: from a web worker (where
+/// `spawn_blocking` runs decoding and generation) it silently drops them, panics included.
+#[cfg(target_family = "wasm")]
+static WEB_LOG_QUEUE: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<RustLog>> =
+    std::sync::OnceLock::new();
+
+/// Sends `log` to Dart, through `WEB_LOG_QUEUE` on the web.
+fn deliver(log: RustLog) {
+    #[cfg(target_family = "wasm")]
+    let log = match WEB_LOG_QUEUE.get() {
+        Some(queue) => match queue.send(log) {
+            Ok(()) => return,
+            Err(unsent) => unsent.0,
+        },
+        None => log,
+    };
+    log.send_signal_to_dart();
+}
+
+/// On the web, starts queueing events and returns the task, to run on the main thread, that
+/// sends them to Dart. Does nothing on other platforms, where any thread can send signals.
+/// Not an `async fn`: the queue must be in place before the first worker starts, not when the
+/// task is first polled.
+#[cfg_attr(not(target_family = "wasm"), allow(clippy::manual_async_fn))]
+pub fn forward_from_workers() -> impl Future<Output = ()> {
+    #[cfg(target_family = "wasm")]
+    let queue = {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let _ = WEB_LOG_QUEUE.set(sender);
+        receiver
+    };
+    async move {
+        #[cfg(target_family = "wasm")]
+        {
+            let mut queue = queue;
+            while let Some(log) = queue.recv().await {
+                log.send_signal_to_dart();
+            }
         }
-        .send_signal_to_dart();
     }
 }
 

@@ -1,12 +1,13 @@
 use crate::signals::{CodeStyle, EccLevel, GeneratedImage, PayloadType, SmallText};
+use crate::web_threads::in_pool;
 use async_trait::async_trait;
 use messages::prelude::{Actor, Address, Context, Notifiable};
 use rinf::{DartSignal, RustSignal};
 use tokio::task::JoinSet;
 use tracing::{debug, error, warn};
 
-// Uncomment below to target the web.
-// use tokio_with_wasm::alias as tokio;
+// `tokio_with_wasm` is tokio itself on native targets and a JavaScript-backed shim on the web.
+use tokio_with_wasm::alias as tokio;
 
 /// The generation actor.
 pub struct GenerationActor {
@@ -34,7 +35,7 @@ impl Notifiable<SmallText> for GenerationActor {
     async fn notify(&mut self, msg: SmallText, _: &Context<Self>) {
         // Rendering and reading the code back take up to seconds, which would stall the
         // single-threaded runtime.
-        let signal = match tokio::task::spawn_blocking(move || generate(&msg)).await {
+        let signal = match tokio::task::spawn_blocking(move || in_pool(|| generate(&msg))).await {
             Ok(signal) => signal,
             Err(e) => {
                 error!(error = %e, "generation task failed");

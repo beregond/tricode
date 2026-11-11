@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Builds the Rust side to WebAssembly and runs the app in Chrome. Extra arguments are passed to
+# `flutter run`, e.g. `tricode-web --release` or `tricode-web -d web-server`.
+#
+# The Rust side is built optimised, since an unoptimised build decodes 20 to 50 times slower (a
+# large image that isn't a code takes minutes). That drops Rust's debug and trace logs; set
+# `TRICODE_WASM_DEBUG=1` for an unoptimised build that keeps them, with the log filter from
+# RUST_LOG (default "info,tricode_core=trace", like tricode-run). Skip the WebAssembly build with
+# `TRICODE_SKIP_WASM=1` when only Dart changed.
+#
+# The headers make the page cross-origin isolated, which browsers require before they expose
+# SharedArrayBuffer: the module runs its work on web workers that share memory with the page.
+# Plain `flutter run -d chrome` works too; web/coi_service_worker.js then adds them after a reload.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+if [[ -z "${TRICODE_SKIP_WASM:-}" ]]; then
+  if [[ -n "${TRICODE_WASM_DEBUG:-}" ]]; then
+    rinf wasm
+  else
+    rinf wasm --release
+  fi
+fi
+exec flutter run -d chrome \
+  --web-header=Cross-Origin-Opener-Policy=same-origin \
+  --web-header=Cross-Origin-Embedder-Policy=require-corp \
+  --dart-define=RUST_LOG="${RUST_LOG:-info,tricode_core=trace}" "$@"

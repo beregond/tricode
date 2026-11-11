@@ -103,6 +103,31 @@ build a release with `flutter build linux` (or `windows`, `macos`, `apk`,
 (Visual Studio on Windows, Xcode on macOS and iOS, the Android SDK and NDK for
 Android); Rust is compiled for the target automatically.
 
+It also runs in the **browser**. The Rust side is compiled to WebAssembly
+first, which needs a nightly Rust toolchain and `wasm-pack` (`rinf wasm`
+installs both):
+
+```sh
+rinf wasm --release         # build web/pkg/
+flutter run -d chrome
+```
+
+Leave out `--release` only to debug the Rust side: an unoptimised build reads
+codes 20 to 50 times slower.
+
+`devbin/tricode-web` runs both steps, and `devbin/tricode-web-build` makes the
+release bundle in `build/web` and packs it into one file,
+`build/Tricode-<version>-web.zip`. Unzip it on any static host (GitHub Pages
+included, or `python3 -m http.server` for a quick look, opened on
+`http://localhost:8000` rather than the `0.0.0.0` address it prints); it loads
+nothing from other sites, but it can't run from a `file://` URL. Over plain
+http it only works on `localhost`, since browsers allow the shared memory only
+in a secure context. The WebAssembly module does its work on web workers sharing memory
+with the page, which browsers only allow on cross-origin isolated pages. When
+the server doesn't send the isolating headers, a small service worker adds
+them, so the first visit reloads the page once. Downloads replace the save
+dialog, and installed fonts and the camera aren't offered in a browser.
+
 Run the tests with `cargo test` and `flutter test`. `AGENTS.md` describes the
 project layout and the code format in detail.
 
@@ -112,8 +137,6 @@ project layout and the code format in detail.
   home with clean images: saved files, screenshots, the clipboard. Photos with
   perspective, blur, glare or uneven light often fail to decode. Better
   camera reading is the next thing to improve.
-- **No web build.** The Rust side is partly prepared for WebAssembly, but the
-  web build isn't switched on or tested.
 
 ## License
 

@@ -13,8 +13,8 @@ use log_filter::LogFilterActor;
 use messages::prelude::Context;
 use tokio::spawn;
 
-// Uncomment below to target the web.
-// use tokio_with_wasm::alias as tokio;
+// `tokio_with_wasm` is tokio itself on native targets and a JavaScript-backed shim on the web.
+use tokio_with_wasm::alias as tokio;
 
 /// Creates and spawns the actors in the async system.
 pub async fn create_actors(log_filter: Option<FilterHandle>) {

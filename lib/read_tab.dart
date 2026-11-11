@@ -381,7 +381,7 @@ class _AnnotatedImage extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             ElevatedButton.icon(
-              onPressed: () => savePng(context, png, 'annotated_image'),
+              onPressed: () => savePng(context, png, 'tricode-annotated'),
               icon: const Icon(Icons.download),
               label: const Text('Download'),
             ),

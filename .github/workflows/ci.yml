@@ -98,6 +98,29 @@ jobs:
       - run: flutter analyze
       - run: flutter test
 
+  web:
+    name: Web build (rinf wasm, flutter build web)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      # `rinf wasm` builds std itself (-Zbuild-std), which needs nightly; it installs the
+      # toolchain, wasm-pack and wasm-bindgen-cli on its own, so the stable toolchain here is
+      # only for rinf_cli.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - run: flutter pub get --enforce-lockfile
+      - run: cargo install rinf_cli --version "$RINF_VERSION" --locked
+      - run: rinf gen
+      - run: rinf wasm --release
+      - run: flutter build web
+
   shellcheck:
     name: ShellCheck (devbin)
     runs-on: ubuntu-latest

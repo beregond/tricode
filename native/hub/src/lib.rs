@@ -4,13 +4,14 @@
 mod actors;
 mod logging;
 mod signals;
+mod web_threads;
 
 use actors::create_actors;
 use rinf::{dart_shutdown, write_interface};
 use tokio::spawn;
 
-// Uncomment below to target the web.
-// use tokio_with_wasm::alias as tokio;
+// `tokio_with_wasm` is tokio itself on native targets and a JavaScript-backed shim on the web.
+use tokio_with_wasm::alias as tokio;
 
 write_interface!();
 
@@ -22,6 +23,9 @@ async fn main() {
     // If you must use blocking code, use `tokio::task::spawn_blocking`
     // or the equivalent provided by your async library.
     let log_filter = logging::init();
+    spawn(logging::forward_from_workers());
+    #[cfg(target_family = "wasm")]
+    web_threads::start_rayon_pool();
     spawn(create_actors(log_filter));
 
     // Keep the main function running until Dart shutdown.

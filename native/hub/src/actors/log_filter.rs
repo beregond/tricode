@@ -7,8 +7,8 @@ use tokio::task::JoinSet;
 use tracing::{info, warn};
 use tracing_subscriber::filter::Targets;
 
-// Uncomment below to target the web.
-// use tokio_with_wasm::alias as tokio;
+// `tokio_with_wasm` is tokio itself on native targets and a JavaScript-backed shim on the web.
+use tokio_with_wasm::alias as tokio;
 
 /// Applies the log filter Dart asks for.
 pub struct LogFilterActor {

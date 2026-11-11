@@ -3,10 +3,10 @@
     "short_name": "Tricode",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
-    "orientation": "portrait-primary",
+    "background_color": "#4a97dd",
+    "theme_color": "#4a97dd",
+    "description": "Encode and decode text in triangle-grid codes.",
+    "orientation": "any",
     "prefer_related_applications": false,
     "icons": [
         {

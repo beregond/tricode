@@ -28,16 +28,31 @@ void showMessage(BuildContext context, String text) {
 double scrollEndPadding(BuildContext context) =>
     MediaQuery.paddingOf(context).bottom + 80;
 
-/// Saves [png] as `{prefix}_{timestamp}.png`: on mobile into the photo
-/// gallery, on desktop wherever the user picks.
+/// Whether this is the Android or iOS app (a browser on a phone doesn't count).
+bool get _isMobileApp =>
+    !kIsWeb &&
+    (defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS);
+
+/// Saves [png] as `{prefix}-{timestamp}.png`: in a browser as a download, on
+/// mobile into the photo gallery, on desktop wherever the user picks.
 Future<void> savePng(BuildContext context, Uint8List png, String prefix) async {
   final timestamp = DateTime.now()
       .toIso8601String()
       .replaceAll(':', '-')
       .split('.')[0];
-  final name = '${prefix}_$timestamp';
+  final name = '$prefix-$timestamp';
   try {
-    if (Platform.isAndroid || Platform.isIOS) {
+    if (kIsWeb) {
+      // On the web, saveTo ignores the path and clicks a download link; the
+      // browser then puts the file wherever its downloads go.
+      await XFile.fromData(
+        png,
+        mimeType: 'image/png',
+        name: '$name.png',
+      ).saveTo('');
+      if (context.mounted) showMessage(context, 'Downloaded $name.png');
+    } else if (_isMobileApp) {
       // The app's own storage directory is hidden from gallery and file
       // manager apps, so mobile saves go to the gallery instead.
       await Gal.putImageBytes(png, name: name);
@@ -54,7 +69,7 @@ Future<void> savePng(BuildContext context, Uint8List png, String prefix) async {
         if (picked == null || !context.mounted) return; // canceled
         // The macOS and Windows dialogs ask before overwriting; the GTK one
         // that file_selector uses on Linux doesn't. Declining picks again.
-        if (!Platform.isLinux ||
+        if (defaultTargetPlatform != TargetPlatform.linux ||
             !File(picked.path).existsSync() ||
             await _confirmOverwrite(context, picked.path)) {
           location = picked;
@@ -78,9 +93,9 @@ Future<void> savePng(BuildContext context, Uint8List png, String prefix) async {
   }
 }
 
-/// Asks whether to replace the existing file at [path].
+/// Asks whether to replace the existing file at [path] (a Linux path).
 Future<bool> _confirmOverwrite(BuildContext context, String path) async {
-  final name = path.split(Platform.pathSeparator).last;
+  final name = path.split('/').last;
   final replace = await showDialog<bool>(
     context: context,
     builder: (context) => AlertDialog(
@@ -148,7 +163,7 @@ Future<Uint8List?> pickImageFile(List<String> extensions) async {
 }
 
 /// Whether this device can take a photo with [takePhoto]: phones and tablets.
-bool get canTakePhoto => !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+bool get canTakePhoto => _isMobileApp;
 
 /// Longest side, in pixels, photos are scaled down to. Codes filling a good
 /// part of the frame keep triangles far wider than the 37 px minimum, and
@@ -184,25 +199,26 @@ void _showSavedSnackBar(BuildContext context, String path) {
 }
 
 /// Label of the action that reveals a saved file, in each system's own words.
-String get _revealLabel {
-  if (Platform.isMacOS) return 'Show in Finder';
-  if (Platform.isWindows) return 'Show in Explorer';
-  return 'Show in folder';
-}
+String get _revealLabel => switch (defaultTargetPlatform) {
+  TargetPlatform.macOS => 'Show in Finder',
+  TargetPlatform.windows => 'Show in Explorer',
+  _ => 'Show in folder',
+};
 
 /// Opens the system file manager with [path] selected, or at least its folder
-/// open. Returns false when nothing could be opened.
+/// open. Returns false when nothing could be opened. Desktop only: a browser
+/// never shows where it saved a download.
 Future<bool> _revealInFileManager(String path) async {
   final file = File(path).absolute;
   try {
-    if (Platform.isMacOS) {
+    if (defaultTargetPlatform == TargetPlatform.macOS) {
       final result = await Process.run('open', ['-R', file.path]);
       if (result.exitCode == 0) return true;
-    } else if (Platform.isWindows) {
+    } else if (defaultTargetPlatform == TargetPlatform.windows) {
       // Explorer exits with 1 even when it worked, so the exit code is ignored.
       await Process.run('explorer.exe', ['/select,', file.path]);
       return true;
-    } else if (Platform.isLinux) {
+    } else if (defaultTargetPlatform == TargetPlatform.linux) {
       // Nautilus, Dolphin, Nemo, Caja and others implement this freedesktop
       // interface, which also selects the file; xdg-open below only opens the
       // folder.
