@@ -50,8 +50,8 @@ jobs:
       - name: Check decode fixtures are up to date
         run: |
           devbin/tricode-regen-fixtures --locked
-          if [ -n "$(git status --porcelain -- native/tricode/testdata/decode)" ]; then
-            git status --short -- native/tricode/testdata/decode
+          if [ -n "$(git status --porcelain -- native/tricode-core/testdata/decode)" ]; then
+            git status --short -- native/tricode-core/testdata/decode
             echo "::error::Decode fixtures are stale. Run devbin/tricode-regen-fixtures and commit the result."
             exit 1
           fi

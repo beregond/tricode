@@ -45,7 +45,7 @@ impl Notifiable<SmallText> for GenerationActor {
     }
 }
 
-impl From<CodeStyle> for tricode::ImageStyle {
+impl From<CodeStyle> for tricode_core::ImageStyle {
     fn from(style: CodeStyle) -> Self {
         match style {
             CodeStyle::Tiles => Self::Tiles,
@@ -55,7 +55,7 @@ impl From<CodeStyle> for tricode::ImageStyle {
     }
 }
 
-impl From<EccLevel> for tricode::EccLevel {
+impl From<EccLevel> for tricode_core::EccLevel {
     fn from(level: EccLevel) -> Self {
         match level {
             EccLevel::Low => Self::Low,
@@ -67,7 +67,7 @@ impl From<EccLevel> for tricode::EccLevel {
 }
 
 impl From<PayloadType> for &'static str {
-    /// The envelope's `type`, as `tricode::GenerateImageParams::payload_type` takes it.
+    /// The envelope's `type`, as `tricode_core::GenerateImageParams::payload_type` takes it.
     fn from(kind: PayloadType) -> Self {
         match kind {
             PayloadType::Text => "text",
@@ -79,7 +79,7 @@ impl From<PayloadType> for &'static str {
 
 /// Generates the code `msg` asks for, as the signal to send back.
 fn generate(msg: &SmallText) -> GeneratedImage {
-    let result = tricode::generate_image_debug(tricode::GenerateImageParams {
+    let result = tricode_core::generate_image_debug(tricode_core::GenerateImageParams {
         payload: &msg.text,
         payload_type: msg.payload_type.into(),
         width_ratio: msg.width_ratio,
@@ -94,7 +94,7 @@ fn generate(msg: &SmallText) -> GeneratedImage {
         mask: msg.mask.map(|m| m as usize),
         triangle_width: msg.triangle_width,
         ecc_level: msg.ecc_level.into(),
-        overlay: (!msg.overlay_png.is_empty()).then_some(tricode::Overlay {
+        overlay: (!msg.overlay_png.is_empty()).then_some(tricode_core::Overlay {
             png: &msg.overlay_png,
             share: msg.overlay_share,
         }),
@@ -122,7 +122,7 @@ fn generate(msg: &SmallText) -> GeneratedImage {
         data_bits_used: report.data_bits_used as u32,
         padding_bits: report.padding_bits as u32,
         mask_index: report.mask_index as u32,
-        mask_name: tricode::MASK_NAMES
+        mask_name: tricode_core::MASK_NAMES
             .get(report.mask_index)
             .copied()
             .unwrap_or_default()

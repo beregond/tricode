@@ -17,7 +17,7 @@ final _log = Logger('overlay');
 
 extension OverlayMaxShare on EccLevel {
   /// Largest share of the code's area an overlay may take at this level,
-  /// matching `EccLevel::max_overlay_share` in native/tricode/src/frame.rs.
+  /// matching `EccLevel::max_overlay_share` in native/tricode-core/src/frame.rs.
   double get maxOverlayShare => switch (this) {
     EccLevel.low => 0.02,
     EccLevel.medium => 0.06,

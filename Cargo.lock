@@ -703,7 +703,7 @@ dependencies = [
  "tokio_with_wasm",
  "tracing",
  "tracing-subscriber",
- "tricode",
+ "tricode-core",
  "wasm-bindgen",
 ]
 
@@ -1858,6 +1858,16 @@ dependencies = [
 name = "tricode"
 version = "1.0.0"
 dependencies = [
+ "clap",
+ "image",
+ "tracing-subscriber",
+ "tricode-core",
+]
+
+[[package]]
+name = "tricode-core"
+version = "1.0.0"
+dependencies = [
  "crc32fast",
  "image",
  "imageproc",
@@ -1870,16 +1880,6 @@ dependencies = [
  "test-log",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "tricode-cli"
-version = "1.0.0"
-dependencies = [
- "clap",
- "image",
- "tracing-subscriber",
- "tricode",
 ]
 
 [[package]]

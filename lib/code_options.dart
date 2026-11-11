@@ -1,11 +1,11 @@
 /// Choices offered for a generated code, mirroring constants in the Rust
-/// crate (native/tricode/src); keep them in sync.
+/// crate (native/tricode-core/src); keep them in sync.
 library;
 
 import 'src/bindings/bindings.dart';
 
 /// Data masks the generator can XOR the payload with, in the same order as
-/// `MASK_NAMES` / `MASKS` in native/tricode/src/mask.rs (the index is sent to
+/// `MASK_NAMES` / `MASKS` in native/tricode-core/src/mask.rs (the index is sent to
 /// Rust).
 const maskNames = [
   'Checkerboard',
@@ -19,7 +19,7 @@ const maskNames = [
 
 /// Triangle base width limits in pixels, matching `MIN_TRIANGLE_WIDTH`,
 /// `DEFAULT_TRIANGLE_WIDTH` and `MAX_TRIANGLE_WIDTH` in
-/// native/tricode/src/grid.rs.
+/// native/tricode-core/src/grid.rs.
 const minTriangleWidth = 37;
 const defaultTriangleWidth = 37;
 const maxTriangleWidth = 149;

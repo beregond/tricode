@@ -1,4 +1,4 @@
-//! Sends `tracing` events from hub and tricode to Dart as `RustLog` signals, so Rust and Dart
+//! Sends `tracing` events from hub and tricode-core to Dart as `RustLog` signals, so Rust and Dart
 //! logs end up in one place on every platform (stderr goes nowhere on mobile and web).
 
 use crate::signals::RustLog;
@@ -22,7 +22,7 @@ fn default_filter() -> Targets {
     Targets::new()
         .with_default(Level::INFO)
         .with_target("hub", Level::DEBUG)
-        .with_target("tricode", Level::DEBUG)
+        .with_target("tricode_core", Level::DEBUG)
 }
 
 /// Installs the Dart-forwarding subscriber and routes panics through it. Returns `None` when a

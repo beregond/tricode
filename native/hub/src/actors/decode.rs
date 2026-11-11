@@ -42,7 +42,7 @@ impl Notifiable<ImageBytes> for DecodeActor {
 
 /// Decodes the image, as the signal to send back.
 fn decode(bytes: &[u8]) -> DecodeResult {
-    let report = match tricode::decode_image(bytes) {
+    let report = match tricode_core::decode_image(bytes) {
         Ok(report) => report,
         Err(e) => {
             info!(error = %e, "image not decodable");

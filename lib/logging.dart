@@ -12,7 +12,7 @@ import 'package:logging/logging.dart';
 import 'src/bindings/bindings.dart';
 
 /// Which Rust events reach Dart, from `--dart-define=RUST_LOG=...`, e.g.
-/// `info,tricode=trace`. Empty keeps Rust's default (hub and tricode at debug,
+/// `info,tricode_core=trace`. Empty keeps Rust's default (hub and tricode-core at debug,
 /// the rest at info). Release builds drop Rust's debug and trace events at
 /// compile time.
 const _rustLogFilter = String.fromEnvironment('RUST_LOG');

@@ -24,7 +24,7 @@ native/hub/                  Rust entry-point crate (name must stay "hub")
   src/actors/                One actor per signal pair
   src/lib.rs                 Tokio runtime entry (current_thread); write_interface!() macro here
   src/logging.rs             tracing subscriber that forwards events to Dart; panic hook
-native/tricode/src/          Pure Rust logic; lib.rs only declares modules and re-exports the public API
+native/tricode-core/src/     Pure Rust logic; lib.rs only declares modules and re-exports the public API
   payload.rs                 msgpack envelope and its fallbacks
   frame.rs                   EccLevel, block layout, encode_frame/decode_frame (+ reed_solomon.rs: GF(256) codec)
   grid.rs                    Triangle/image sizes, grid capacity and sizing, cell layout, orientation marks
@@ -37,7 +37,7 @@ native/tricode/src/          Pure Rust logic; lib.rs only declares modules and r
                              anchors), lattice.rs (lattice fit), count.rs (naive/cluster estimates),
                              search.rs (grid strategies), read.rs (sampling, flips, unmasking), annotate.rs
   tests.rs                   End-to-end tests and shared test helpers (`params`, `payload`, …)
-native/tricode-cli/          Command-line frontend, binary `tricode` (src/main.rs: `encode`, `decode`); mirrors the Generate/Read options except text overlays and colour presets
+native/tricode/              Command-line frontend, crate and binary `tricode` (src/main.rs: `encode`, `decode`); mirrors the Generate/Read options except text overlays and colour presets
 docs/privacy.html            Privacy policy for the store listings
 Cargo.toml                   Workspace root (members = ["native/*"]); any new crate in native/ auto-joins
 ```
@@ -72,13 +72,13 @@ Each actor spawns its own Dart-signal listener in `new()` using `JoinSet::spawn`
 | Task | Command |
 |---|---|
 | Run app | `flutter run` |
-| Run CLI | `cargo run --release -p tricode-cli -- encode "hi" -o hi.png` / `-- decode hi.png` |
+| Run CLI | `cargo run --release -p tricode -- encode "hi" -o hi.png` / `-- decode hi.png` |
 | Run app on Linux with Rust logs | `tricode-run` (`RUST_LOG=warn tricode-run` to change the filter) |
 | Regenerate bindings | `rinf gen` |
 | Dart analysis | `flutter analyze` |
 | Dart format | `dart format .` |
 | Rust build (check) | `cargo build` (from repo root) |
-| Rust tests | `cargo test` or `cargo test -p tricode` |
+| Rust tests | `cargo test` or `cargo test -p tricode-core` |
 | tricode tests (release, fast) | `tricode-test [cargo test args]` |
 | Regenerate decode fixtures | `tricode-regen-fixtures` |
 | Regenerate app icons | `tricode-regen-icons` |
@@ -89,7 +89,7 @@ Each actor spawns its own Dart-signal listener in `new()` using `JoinSet::spawn`
 
 ## Clippy denies in `native/hub`
 
-These are `deny`-level in `native/hub/Cargo.toml` (not in `native/tricode`):
+These are `deny`-level in `native/hub/Cargo.toml` (not in `native/tricode-core`):
 - `clippy::unwrap_used` — no `.unwrap()`
 - `clippy::expect_used` — no `.expect()`
 - `clippy::wildcard_imports` — no `use foo::*`
@@ -99,11 +99,11 @@ Both crates also deny `print_stdout`, `print_stderr` and `dbg_macro`; see Loggin
 ## Logging
 
 Never print. Rust logs with `tracing` macros (`debug!`, `trace!` with structured fields), Dart with `package:logging` (`Logger('<file>')`, and `catch (e, stack)` blocks pass both to the log).
-- **tricode** only emits events and never installs a subscriber. Its tests use `use test_log::test;`, so `RUST_LOG=tricode=trace tricode-test <name> -- --nocapture` shows a test's decode trace (failing tests print it without `--nocapture`).
+- **tricode-core** only emits events and never installs a subscriber. Its tests use `use test_log::test;`, so `RUST_LOG=tricode_core=trace tricode-test <name> -- --nocapture` shows a test's decode trace (failing tests print it without `--nocapture`).
 - **hub** (`src/logging.rs`) installs the subscriber, sends each event to Dart as a `RustLog` signal (spans and fields folded into `message`), and replaces rinf's panic hook so panics are logged in release too. Never log payload text (user content): log its length.
 - **Dart** (`lib/logging.dart`) re-logs Rust events as `rust.<target>`, sends records to `dart:developer` (DevTools Logging view) and, in debug builds, to the console via `debugPrint`. It also sets `FlutterError.onError` and `PlatformDispatcher.onError`.
-- **Filter**: Rust defaults to hub and tricode at debug, the rest at info. Override with `flutter run --dart-define=RUST_LOG=info,tricode=trace` (`Targets` syntax, sent as `RustLogFilter` at start-up); `tricode-run` does this on Linux, with that filter as its default.
-- **Release builds** compile out Rust `debug!`/`trace!` (`release_max_level_info` on hub's `tracing` dependency; set there so `tricode-test`, a release build of tricode alone, keeps them), and Dart drops records below INFO.
+- **Filter**: Rust defaults to hub and tricode-core at debug, the rest at info. Override with `flutter run --dart-define=RUST_LOG=info,tricode_core=trace` (`Targets` syntax, sent as `RustLogFilter` at start-up); `tricode-run` does this on Linux, with that filter as its default.
+- **Release builds** compile out Rust `debug!`/`trace!` (`release_max_level_info` on hub's `tracing` dependency; set there so `tricode-test`, a release build of tricode-core alone, keeps them), and Dart drops records below INFO.
 
 ## Non-obvious facts
 
@@ -111,11 +111,11 @@ Never print. Rust logs with `tracing` macros (`debug!`, `trace!` with structured
 - **`lib/src/bindings/` is fully generated** — `rinf gen` overwrites all files there; don't edit them.
 - **`write_interface!()` macro** in `hub/src/lib.rs` is required by rinf — do not remove it.
 - **Tokio runs `current_thread` flavor** in hub — blocking calls inside actors will stall the entire async runtime; use `tokio::task::spawn_blocking` for CPU-heavy work (the generation and decode actors do).
-- **`tricode::decode_image()` returns `Result<DecodeDebug, String>`**, not a plain string. `Err` means no anchors were found at all; a grid that doesn't decode is `Ok` with `text: None` and `error` set. `DecodeDebug` also holds dimensions, triangle counts, `decode_method` and `annotated_png: Vec<u8>`.
-- **`image` crate in tricode** uses `default-features = false` with only `png` + `rayon` features — only PNG I/O works; adding other formats requires editing `native/tricode/Cargo.toml`. The CLI has its own `image` dependency with `jpeg` and `webp`, and re-encodes other formats to PNG for decoding and overlays (scaled to ≤ 1024 px like the app).
+- **`tricode_core::decode_image()` returns `Result<DecodeDebug, String>`**, not a plain string. `Err` means no anchors were found at all; a grid that doesn't decode is `Ok` with `text: None` and `error` set. `DecodeDebug` also holds dimensions, triangle counts, `decode_method` and `annotated_png: Vec<u8>`.
+- **`image` crate in tricode-core** uses `default-features = false` with only `png` + `rayon` features — only PNG I/O works; adding other formats requires editing `native/tricode-core/Cargo.toml`. The CLI has its own `image` dependency with `jpeg` and `webp`, and re-encodes other formats to PNG for decoding and overlays (scaled to ≤ 1024 px like the app).
 - **Decode input is PNG only**: the Read tab's `_decode` re-encodes anything else (JPEG files, clipboard JPEGs, camera photos) with `imageToPng` in `lib/overlay.dart` before sending `ImageBytes`. On Android and iOS (`canTakePhoto`) it also offers **Take Photo** (`takePhoto` in `lib/image_io.dart`, `image_picker`, scaled to ≤ 2048 px); iOS needs `NSCameraUsageDescription` in `ios/Runner/Info.plist`.
-- **`native/tricode` has no `tests/` directory**: unit tests sit in `#[cfg(test)] mod tests` at the bottom of their module, and end-to-end tests in `src/tests.rs`, whose helpers (`params`, `payload`, `all_cases`, `grid_of`) the module tests reuse. Build test parameters as `GenerateImageParams { style, ..params(&text) }`.
-- **Decode fixtures** live in `native/tricode/testdata/decode/`, named `{style}_{w}x{h}_len{len}_{rows}x{cols}.png`. After an intentional rendering-format change, rewrite them with `tricode-regen-fixtures`. Tests are slow in debug builds (triangle detection), so prefer `tricode-test`, which runs them with `--release` but keeps overflow checks on (`CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS`), since the app's debug build panics on overflow.
+- **`native/tricode-core` has no `tests/` directory**: unit tests sit in `#[cfg(test)] mod tests` at the bottom of their module, and end-to-end tests in `src/tests.rs`, whose helpers (`params`, `payload`, `all_cases`, `grid_of`) the module tests reuse. Build test parameters as `GenerateImageParams { style, ..params(&text) }`.
+- **Decode fixtures** live in `native/tricode-core/testdata/decode/`, named `{style}_{w}x{h}_len{len}_{rows}x{cols}.png`. After an intentional rendering-format change, rewrite them with `tricode-regen-fixtures`. Tests are slow in debug builds (triangle detection), so prefer `tricode-test`, which runs them with `--release` but keeps overflow checks on (`CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS`), since the app's debug build panics on overflow.
 - **Triangle width** (`GenerateImageParams::triangle_width`) is odd, `MIN_TRIANGLE_WIDTH`..=`MAX_TRIANGLE_WIDTH` (37–149 px, default 37), and images over `MAX_IMAGE_PIXELS` (50 MP) are refused; `generate_image_debug` returns `Err` for both and the hub forwards it as `GeneratedImage.error`. The limits are duplicated in `lib/code_options.dart` — keep them in sync. Borders scale from their 51 px design width; decode fixtures are rendered at 51 px (`FIXTURE_TRIANGLE_WIDTH`).
 - **Copy and Download on mobile**: copying an image (`super_clipboard`) needs the `DataProvider` `<provider>` in `android/app/src/main/AndroidManifest.xml`, or Android reports success while the clipboard stays empty. Download (`savePng`) puts the image in the photo gallery with `gal` on Android and iOS (`NSPhotoLibraryAddUsageDescription` in `Info.plist`, `WRITE_EXTERNAL_STORAGE` up to API 29), because the app's own storage directory is invisible to gallery and file manager apps.
 - **Centre overlays**: `GenerateImageParams::overlay` takes only PNG bytes and a `share` of the code's area; Rust knows nothing about fonts or other image formats. Dart renders text (`textToOverlayPng`, styled by `OverlayTextStyle`: font from `overlayFonts`, bold, italic, colour (may be transparent), and an optional outline drawn as a stroke under the fill; by default the text takes the primary colour and the outline the secondary; cropped to its ink) and re-encodes picked or pasted images (`imageToOverlayPng`, scaled to ≤ 1024 px) in `lib/overlay.dart`. Rust drops every cell whose triangle reaches into the centred box, then draws the image scaled to fit inside it. `share` is capped per level by `EccLevel::max_overlay_share` (2/6/15/18%, the solid covers `survives_a_covered_centre` checks), duplicated as `EccLevel.maxOverlayShare` in `lib/overlay.dart`, so keep them in sync.

@@ -9,6 +9,6 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 cargo fetch --locked
 cargo about generate -c about.toml --manifest-path native/hub/Cargo.toml --format json --frozen --fail |
   jq '[.licenses[]
-       | {text, crates: [.used_by[].crate.name | select(. != "tricode")] | unique}
+       | {text, crates: [.used_by[].crate.name | select(. != "tricode-core")] | unique}
        | select(.crates | length > 0)]
       | sort_by(.crates, .text)' > assets/licenses/rust.json

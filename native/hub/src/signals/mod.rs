@@ -21,11 +21,11 @@ pub struct SmallText {
     pub primary_variance: bool,
     /// The same for the secondary shapes
     pub secondary_variance: bool,
-    /// Debug: index into `tricode::MASK_NAMES` of the mask to XOR the data with;
+    /// Debug: index into `tricode_core::MASK_NAMES` of the mask to XOR the data with;
     /// `None` picks the most balanced mask, as normal generation does
     pub mask: Option<u32>,
-    /// Triangle base width in pixels: odd, between `tricode::MIN_TRIANGLE_WIDTH` and
-    /// `tricode::MAX_TRIANGLE_WIDTH`; `tricode::DEFAULT_TRIANGLE_WIDTH` normally
+    /// Triangle base width in pixels: odd, between `tricode_core::MIN_TRIANGLE_WIDTH` and
+    /// `tricode_core::MAX_TRIANGLE_WIDTH`; `tricode_core::DEFAULT_TRIANGLE_WIDTH` normally
     pub triangle_width: u32,
     /// Higher levels make the grid larger.
     pub ecc_level: EccLevel,
@@ -33,11 +33,11 @@ pub struct SmallText {
     /// Dart); empty for none
     pub overlay_png: Vec<u8>,
     /// Share of the code's area the overlay takes: above 0 and at most
-    /// `tricode::EccLevel::max_overlay_share` of the level; ignored without an overlay
+    /// `tricode_core::EccLevel::max_overlay_share` of the level; ignored without an overlay
     pub overlay_share: f64,
 }
 
-/// How the code's triangles are drawn; mirrors `tricode::ImageStyle`.
+/// How the code's triangles are drawn; mirrors `tricode_core::ImageStyle`.
 #[derive(Deserialize, SignalPiece, Clone, Copy)]
 pub enum CodeStyle {
     Tiles,
@@ -54,7 +54,7 @@ pub enum PayloadType {
     Plain,
 }
 
-/// Error correction; mirrors `tricode::EccLevel`.
+/// Error correction; mirrors `tricode_core::EccLevel`.
 #[derive(Deserialize, SignalPiece, Clone, Copy)]
 pub enum EccLevel {
     /// ~7% of the code can be damaged
@@ -107,25 +107,25 @@ pub struct GeneratedImage {
     pub grid_columns: u32,
     pub data_bits_used: u32, // bits written from encoded data
     pub padding_bits: u32,   // zero-fill bits to complete the grid
-    pub mask_index: u32,     // index into `tricode::MASK_NAMES` of the mask that was used
+    pub mask_index: u32,     // index into `tricode_core::MASK_NAMES` of the mask that was used
     pub mask_name: String,
     pub colour_transitions: u32, // shared triangle edges between cells of different colour
     pub shared_edges: u32,       // all triangle edges shared by two cells
     pub decode_warning: String,  // why the code doesn't read back; empty when it decodes
 }
 
-/// One `tracing` event from Rust (hub or tricode), forwarded to the Dart log.
+/// One `tracing` event from Rust (hub or tricode-core), forwarded to the Dart log.
 #[derive(Serialize, RustSignal)]
 pub struct RustLog {
     /// "TRACE", "DEBUG", "INFO", "WARN" or "ERROR"
     pub level: String,
-    /// Module path of the event, e.g. "tricode" or "hub::actors::decode"
+    /// Module path of the event, e.g. "tricode_core::decode" or "hub::actors::decode"
     pub target: String,
     /// The message, prefixed by its enclosing spans and followed by its `key=value` fields
     pub message: String,
 }
 
-/// Replaces which Rust events reach Dart, e.g. "info,tricode=trace" (`tracing_subscriber`'s
+/// Replaces which Rust events reach Dart, e.g. "info,tricode_core=trace" (`tracing_subscriber`'s
 /// `Targets` syntax). Release builds drop debug and trace events at compile time.
 #[derive(Deserialize, DartSignal)]
 pub struct RustLogFilter {

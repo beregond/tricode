@@ -9,7 +9,7 @@ double _luma(Color c) =>
 
 void main() {
   test('every preset is far enough apart in brightness to decode', () {
-    // `MIN_LUMA_GAP` in native/tricode/src/decode/mod.rs.
+    // `MIN_LUMA_GAP` in native/tricode-core/src/decode/mod.rs.
     const minLumaGap = 24;
     for (final preset in colorPresets) {
       final gap = (_luma(preset.primary) - _luma(preset.secondary)).abs();

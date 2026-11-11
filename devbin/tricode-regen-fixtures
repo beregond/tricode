@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Rewrites the decode fixtures in native/tricode/testdata/decode/ from the current renderer.
+# Rewrites the decode fixtures in native/tricode-core/testdata/decode/ from the current renderer.
 # Only run this after an intentional rendering-format change, then review the diff.
 # CI runs it too and fails if the committed fixtures differ.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # Fixture names include the grid size, so a format change would otherwise leave stale files behind.
-rm -f native/tricode/testdata/decode/*.png
+rm -f native/tricode-core/testdata/decode/*.png
 # Same profile as tricode-test, so the two share one build.
 export CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true
-exec cargo test -p tricode --release "$@" -- --ignored regenerate_decode_fixtures
+exec cargo test -p tricode-core --release "$@" -- --ignored regenerate_decode_fixtures

@@ -1,7 +1,7 @@
 //! `tricode`: generate and read tricodes from the terminal.
 //!
 //! Decoded text goes to stdout, everything else (warnings, errors, debug info, logs) to stderr, so
-//! the output can be piped. Logs follow `RUST_LOG` (default `warn`), e.g. `RUST_LOG=tricode=trace`.
+//! the output can be piped. Logs follow `RUST_LOG` (default `warn`), e.g. `RUST_LOG=tricode_core=trace`.
 
 use std::fs;
 use std::io::Cursor;
@@ -56,7 +56,7 @@ struct EncodeArgs {
     #[arg(long, default_value = "21:13", value_parser = parse_ratio)]
     ratio: (u32, u32),
     /// Triangle base width in pixels (odd).
-    #[arg(long, default_value_t = tricode::DEFAULT_TRIANGLE_WIDTH)]
+    #[arg(long, default_value_t = tricode_core::DEFAULT_TRIANGLE_WIDTH)]
     triangle_width: u32,
     /// Colour of the primary triangles, as RRGGBB (always opaque).
     #[arg(long, default_value = "000000", value_parser = parse_color)]
@@ -117,7 +117,7 @@ enum Style {
     Horizon,
 }
 
-impl From<Style> for tricode::ImageStyle {
+impl From<Style> for tricode_core::ImageStyle {
     fn from(style: Style) -> Self {
         match style {
             Style::Tiles => Self::Tiles,
@@ -135,7 +135,7 @@ enum Ecc {
     High,
 }
 
-impl From<Ecc> for tricode::EccLevel {
+impl From<Ecc> for tricode_core::EccLevel {
     fn from(ecc: Ecc) -> Self {
         match ecc {
             Ecc::Low => Self::Low,
@@ -146,7 +146,7 @@ impl From<Ecc> for tricode::EccLevel {
     }
 }
 
-/// The masks of `tricode::MASK_NAMES`, in the same order.
+/// The masks of `tricode_core::MASK_NAMES`, in the same order.
 #[derive(Clone, Copy, ValueEnum)]
 enum Mask {
     Checkerboard,
@@ -220,14 +220,14 @@ fn main() -> ExitCode {
 }
 
 fn encode(args: EncodeArgs) -> Result<(), String> {
-    let ecc_level = tricode::EccLevel::from(args.ecc);
+    let ecc_level = tricode_core::EccLevel::from(args.ecc);
     let seed = args.seed.unwrap_or_else(clock_seed);
     let overlay_png = args.overlay.as_deref().map(overlay_png).transpose()?;
-    let overlay = overlay_png.as_deref().map(|png| tricode::Overlay {
+    let overlay = overlay_png.as_deref().map(|png| tricode_core::Overlay {
         png,
         share: ecc_level.max_overlay_share() * args.overlay_size / 100.0,
     });
-    let debug = tricode::generate_image_debug(tricode::GenerateImageParams {
+    let debug = tricode_core::generate_image_debug(tricode_core::GenerateImageParams {
         payload: &args.text,
         payload_type: args.payload_type.name(),
         width_ratio: args.ratio.0,
@@ -245,7 +245,7 @@ fn encode(args: EncodeArgs) -> Result<(), String> {
         overlay,
     })?;
     if args.verbose {
-        let mask = tricode::MASK_NAMES
+        let mask = tricode_core::MASK_NAMES
             .get(debug.mask_index)
             .copied()
             .unwrap_or("?");
@@ -272,7 +272,7 @@ fn encode(args: EncodeArgs) -> Result<(), String> {
 
 fn decode(input: &Path, verbose: bool, annotated: Option<&Path>) -> Result<(), String> {
     let bytes = fs::read(input).map_err(|e| format!("can't read {}: {e}", input.display()))?;
-    let debug = tricode::decode_image(&as_png(&bytes, input)?)?;
+    let debug = tricode_core::decode_image(&as_png(&bytes, input)?)?;
     if verbose {
         eprintln!(
             "image:           {} × {} px",

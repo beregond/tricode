@@ -32,7 +32,7 @@ const zeroDawnPreset = ColorPreset(
 );
 
 /// The primary and secondary colours of a preset must differ in brightness by at least
-/// `MIN_LUMA_GAP` (native/tricode/src/decode/mod.rs); either may be the
+/// `MIN_LUMA_GAP` (native/tricode-core/src/decode/mod.rs); either may be the
 /// lighter one. The first is the default black on white.
 const colorPresets = [
   ColorPreset('Classic', Color(0xFF000000), Color(0xFFFFFFFF)),

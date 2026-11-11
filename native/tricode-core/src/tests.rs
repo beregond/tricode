@@ -121,7 +121,7 @@ const FIXTURE_PAYLOAD_LENGTHS: [usize; 4] = [5, 40, 150, 400];
 const FIXTURE_TRIANGLE_WIDTH: u32 = 51;
 
 /// Rewrites the fixtures from the current renderer. Only run after an intentional format change:
-/// `tricode-regen-fixtures` (or `cargo test -p tricode --release -- --ignored regenerate_decode_fixtures`)
+/// `tricode-regen-fixtures` (or `cargo test -p tricode-core --release -- --ignored regenerate_decode_fixtures`)
 #[test]
 #[ignore]
 fn regenerate_decode_fixtures() {

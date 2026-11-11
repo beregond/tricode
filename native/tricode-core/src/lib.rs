@@ -7,7 +7,7 @@
 //!   [`Overlay`].
 //!
 //! ```no_run
-//! use tricode::{
+//! use tricode_core::{
 //!     DEFAULT_ECC_LEVEL, DEFAULT_TRIANGLE_WIDTH, GenerateImageParams, ImageStyle, decode_image,
 //!     generate_image_debug,
 //! };
