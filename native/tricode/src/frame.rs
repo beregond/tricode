@@ -21,6 +21,7 @@ pub enum EccLevel {
 pub const DEFAULT_ECC_LEVEL: EccLevel = EccLevel::Medium;
 
 impl EccLevel {
+    /// Every level, lowest first.
     pub const ALL: [EccLevel; 4] = [
         EccLevel::Low,
         EccLevel::Medium,
@@ -38,7 +39,7 @@ impl EccLevel {
         }
     }
 
-    /// Largest share of the code's area an [`Overlay`] may take at this level. These are the
+    /// Largest share of the code's area an [`Overlay`](crate::Overlay) may take at this level. These are the
     /// solid covers `survives_a_covered_centre` checks, so a code with an overlay this large still
     /// decodes.
     pub fn max_overlay_share(self) -> f64 {

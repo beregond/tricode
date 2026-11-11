@@ -25,6 +25,7 @@ use std::time::SystemTime;
 
 pub use overlay::{MAX_OVERLAY_PIXELS, Overlay};
 
+/// How the triangles are drawn. Every style decodes the same way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageStyle {
     /// Triangles with a 1-pixel gap (border excluded) between neighbours.
@@ -32,16 +33,22 @@ pub enum ImageStyle {
     /// Triangles filled edge-to-edge with no gap.
     Stain,
     /// Triangles of the same colour joined into diagonal groups, each drawn as one shape with a
-    /// border around it (see [`HorizonLayout`]).
+    /// border around it.
     Horizon,
 }
 
 /// Parameters for [`generate_image_debug`].
 pub struct GenerateImageParams<'a> {
+    /// The text to encode.
     pub payload: &'a str,
+    /// What the payload is, such as `"text"` or `"url"`; stored in the code and returned as
+    /// [`DecodeDebug::content_type`](crate::DecodeDebug::content_type).
     pub payload_type: &'a str,
+    /// Width of the image's aspect ratio, such as 16 in 16:9.
     pub width_ratio: u32,
+    /// Height of the image's aspect ratio.
     pub height_ratio: u32,
+    /// How the triangles are drawn.
     pub style: ImageStyle,
     /// Colour of the primary triangles (bit 1), as ARGB (`0xAARRGGBB`); always drawn opaque.
     pub primary_color: u32,
@@ -53,7 +60,7 @@ pub struct GenerateImageParams<'a> {
     pub bg_color: u32,
     /// Seed of the Horizon grouping and of colour variance; 0 picks one from the clock.
     pub seed: u64,
-    /// Shifts every primary shape's colour a little in brightness (see [`shade`]), picked by
+    /// Shifts every primary shape's colour a little in brightness (by 0 to 7 points of HSV value), picked by
     /// `seed`.
     pub primary_variance: bool,
     /// The same for the secondary shapes.
@@ -74,15 +81,24 @@ pub struct GenerateImageParams<'a> {
 /// Debug information collected during image generation.
 #[derive(Debug, Clone)]
 pub struct GenerateDebug {
+    /// The generated code as a PNG.
     pub png_bytes: Vec<u8>,
-    pub encoded_bytes: usize, // bytes after Reed-Solomon encoding
+    /// Bytes after Reed-Solomon encoding.
+    pub encoded_bytes: usize,
+    /// Rows of triangles in the grid.
     pub grid_rows: u32,
+    /// Columns of triangles in the grid.
     pub grid_columns: u32,
-    pub data_bits_used: usize, // bits actually written from encoded_data
-    pub padding_bits: usize,   // zero-fill bits to complete the grid
-    pub mask_index: usize,     // index into MASKS of the mask the data was XORed with
-    pub colour_transitions: usize, // shared triangle edges between cells of different colour
-    pub shared_edges: usize,   // all triangle edges shared by two cells
+    /// Bits written from the encoded bytes.
+    pub data_bits_used: usize,
+    /// Zero-fill bits that complete the grid.
+    pub padding_bits: usize,
+    /// Index into [`MASK_NAMES`](crate::MASK_NAMES) of the mask the data was XORed with.
+    pub mask_index: usize,
+    /// Shared triangle edges between cells of different colour.
+    pub colour_transitions: usize,
+    /// All triangle edges shared by two cells.
+    pub shared_edges: usize,
     /// Why the generated code doesn't read back; `None` when it decodes to the payload.
     pub decode_warning: Option<String>,
 }

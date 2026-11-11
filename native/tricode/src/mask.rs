@@ -23,7 +23,7 @@ fn apply_mask(data: &[u8], mask: &[&[u8]], width_squares: u32) -> Vec<u8> {
     result
 }
 
-/// Human-readable names of [`MASKS`], in the same order.
+/// Human-readable names of the masks, in the order [`GenerateImageParams::mask`](crate::GenerateImageParams::mask) indexes them.
 pub const MASK_NAMES: [&str; 7] = [
     "Checkerboard",
     "2×2 blocks",

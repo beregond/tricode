@@ -1,13 +1,16 @@
 [package]
 name = "tricode"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
+rust-version = "1.89"
 license = "MIT"
 description = "Encode text into triangle-grid codes and read them back from images"
 repository = "https://github.com/beregond/tricode"
 readme = "README.md"
 keywords = ["barcode", "triangle", "reed-solomon", "encoding", "image"]
 categories = ["encoding", "multimedia::images"]
+# Decode fixtures (2 MB) are only for the repository's tests.
+exclude = ["testdata/"]
 
 # Log with `tracing` macros instead; the hub forwards events to Dart.
 [lints.clippy]

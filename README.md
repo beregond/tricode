@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/header.png" alt="tricode - do more with less edges">
+</p>
+
 # tricode
 
 A Flutter + Rust app that encodes text into codes made of triangles and reads

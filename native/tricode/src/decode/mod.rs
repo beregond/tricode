@@ -25,15 +25,26 @@ pub(crate) use read::FLIPS;
 /// Debug information collected during image decoding.
 #[derive(Debug, Clone)]
 pub struct DecodeDebug {
-    pub text: Option<String>,  // Some on success, None on decode failure
-    pub content_type: String,  // "text", "url", "plain" (fallback), or empty on failure
-    pub error: Option<String>, // Some on failure, None on success
+    /// The decoded payload; `None` on failure.
+    pub text: Option<String>,
+    /// The payload type it was generated with (such as `"text"` or `"url"`), `"plain"` for codes
+    /// without one, or empty on failure.
+    pub content_type: String,
+    /// Why the code didn't decode; `None` on success.
+    pub error: Option<String>,
+    /// Width of the input image in pixels.
     pub image_width: u32,
+    /// Height of the input image in pixels.
     pub image_height: u32,
+    /// Triangles detected in the image.
     pub total_triangles: usize,
+    /// Rows of the grid that was read (or last tried).
     pub row_count: usize,
+    /// Columns of the grid that was read (or last tried).
     pub column_count: usize,
+    /// Data bits the grid holds.
     pub bit_count: usize,
+    /// PNG of the input with the detected triangles and grid drawn over it.
     pub annotated_png: Vec<u8>,
     /// Which decode attempt succeeded (or was last tried on failure):
     /// "lattice-fit", "naive", "cluster+pitch", any of them with a " ±5" suffix when found in the
