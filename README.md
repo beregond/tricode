@@ -48,7 +48,7 @@ An honest comparison.
 
 **Where tricode is better:**
 
-- mysterrious
+- mysterious
 - more triangles
 - looks much better
 
@@ -58,7 +58,8 @@ A lot of inspiration comes from game franchise **Horizon**. tricode is a fun pro
 
 ## Command line
 
-The CLI writes and reads the same codes:
+The CLI, [`tricode` on crates.io](https://crates.io/crates/tricode), writes
+and reads the same codes:
 
 ```shell
 cargo install tricode
@@ -70,6 +71,18 @@ tricode decode hi.png
 `decode` reads PNG, JPEG and WebP and prints the text to stdout. Run
 `tricode encode --help` for styles, colours, error correction levels and logo
 overlays.
+
+## Library
+
+Need the API rather than a binary? The encoder and decoder live in the
+[`tricode-core`](https://crates.io/crates/tricode-core) crate, which both the
+app and the CLI use. It's pure Rust with no UI or I/O: `generate_image_debug`
+turns `GenerateImageParams` into a PNG, and `decode_image` reads PNG bytes
+back.
+
+```shell
+cargo add tricode-core
+```
 
 ## Building
 
