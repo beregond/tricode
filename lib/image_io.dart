@@ -43,13 +43,23 @@ Future<void> savePng(BuildContext context, Uint8List png, String prefix) async {
       await Gal.putImageBytes(png, name: name);
       if (context.mounted) showMessage(context, 'Image saved to the gallery');
     } else {
-      final location = await getSaveLocation(
-        suggestedName: '$name.png',
-        acceptedTypeGroups: [
-          const XTypeGroup(label: 'PNG Images', extensions: ['png']),
-        ],
-      );
-      if (location == null) return; // canceled
+      FileSaveLocation? location;
+      while (location == null) {
+        final picked = await getSaveLocation(
+          suggestedName: '$name.png',
+          acceptedTypeGroups: [
+            const XTypeGroup(label: 'PNG Images', extensions: ['png']),
+          ],
+        );
+        if (picked == null || !context.mounted) return; // canceled
+        // The macOS and Windows dialogs ask before overwriting; the GTK one
+        // that file_selector uses on Linux doesn't. Declining picks again.
+        if (!Platform.isLinux ||
+            !File(picked.path).existsSync() ||
+            await _confirmOverwrite(context, picked.path)) {
+          location = picked;
+        }
+      }
       await XFile.fromData(
         png,
         mimeType: 'image/png',
@@ -66,6 +76,29 @@ Future<void> savePng(BuildContext context, Uint8List png, String prefix) async {
     _log.warning('Saving image failed', e, stack);
     if (context.mounted) showMessage(context, 'Error saving image: $e');
   }
+}
+
+/// Asks whether to replace the existing file at [path].
+Future<bool> _confirmOverwrite(BuildContext context, String path) async {
+  final name = path.split(Platform.pathSeparator).last;
+  final replace = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('Replace file?'),
+      content: Text('“$name” already exists. Do you want to replace it?'),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, true),
+          child: const Text('Replace'),
+        ),
+      ],
+    ),
+  );
+  return replace ?? false;
 }
 
 /// Copies [png] to the system clipboard.

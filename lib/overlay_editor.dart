@@ -2,7 +2,6 @@
 /// image, and how much of the code it covers.
 library;
 
-import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -126,8 +125,6 @@ class OverlayEditor extends StatefulWidget {
 }
 
 class _OverlayEditorState extends State<OverlayEditor> {
-  Timer? _textDebounce;
-
   // Installed font families, listed the first time the picker opens.
   Future<List<String>>? _installedFonts;
 
@@ -137,12 +134,6 @@ class _OverlayEditorState extends State<OverlayEditor> {
   void _change(VoidCallback change) {
     _settings.update(change);
     widget.onChanged();
-  }
-
-  @override
-  void dispose() {
-    _textDebounce?.cancel();
-    super.dispose();
   }
 
   @override
@@ -191,6 +182,8 @@ class _OverlayEditorState extends State<OverlayEditor> {
     );
   }
 
+  // Typing doesn't regenerate: the new text shows once the user presses
+  // Generate or changes another option.
   Widget _buildTextField() {
     return TextField(
       controller: _settings.text,
@@ -200,13 +193,6 @@ class _OverlayEditorState extends State<OverlayEditor> {
         labelText: 'Logo text',
         border: OutlineInputBorder(),
       ),
-      onChanged: (_) {
-        _textDebounce?.cancel();
-        _textDebounce = Timer(
-          const Duration(milliseconds: 500),
-          widget.onChanged,
-        );
-      },
     );
   }
 
